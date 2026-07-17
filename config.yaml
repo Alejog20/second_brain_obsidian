@@ -1,0 +1,54 @@
+# Second Brain configuration
+# Copy to config.yaml and edit. Paths below are as seen INSIDE the worker
+# container (see docker-compose.yml volume mounts).
+
+vault:
+  path: /vault
+  daily_notes_folder: "01-Daily"
+  daily_note_date_format: "MM-DD-YYYY"   # match Obsidian's Daily Notes / Periodic Notes plugin setting
+  excluded_folders:
+    - "_staging"
+    - "_reports"
+    - "attachments"
+    - "templates"
+
+safety:
+  mode: dry_run              # dry_run | apply — start here, flip to apply once you trust the output
+  require_git: true          # refuse to run if the vault isn't a git repo
+  materiality_threshold: structural   # structural | any
+  # structural = only renames, merges, taxonomy moves, deletions get full writeups
+  # any        = every edit gets a full writeup (noisy, use briefly if you want to audit closely)
+
+embeddings:
+  provider: ollama            # ollama | voyage
+  model: nomic-embed-text     # 768-dim, good default balance for Obsidian-sized vaults
+  store: lancedb              # lancedb | chroma
+  store_path: /data/vector_store
+
+models:
+  # Route by task. Cheapest model that clears the quality bar for that task wins.
+  # provider: ollama | anthropic | deepseek | google | openai
+  bulk_grammar_pass:
+    provider: ollama
+    model: qwen3:14b
+  title_and_tagging:
+    provider: anthropic
+    model: claude-haiku-4-5
+  daily_digestion:
+    provider: anthropic
+    model: claude-sonnet-5
+  taxonomy_analysis:
+    provider: anthropic
+    model: claude-opus-4-8       # run once per major reorg, not nightly
+  chat_agent:
+    provider: anthropic
+    model: claude-sonnet-5       # consumed by Copilot for Obsidian, not this pipeline directly
+
+cost_tracking:
+  enabled: true
+  currency: USD
+
+report:
+  path: "_reports/Review-{date}.md"
+  full_diff_log_path: "_reports/{date}-full-diff.json"
+  include_cost_summary: true
