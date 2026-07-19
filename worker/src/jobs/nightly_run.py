@@ -1,5 +1,6 @@
 """Nightly run job: orchestrates manifest diff -> reorganize -> digest -> AGENTS.md -> report."""
 
+import logging
 import os
 import re
 from datetime import datetime
@@ -20,6 +21,8 @@ from ..vault_io import Note, VaultIO
 from ..vector_store import Embedder, OllamaEmbeddingClient, VectorStore
 from ..worktree import NightlyWorktree
 
+logger = logging.getLogger(__name__)
+
 _DATE_FORMAT_PATTERNS = {
     "MM-DD-YYYY": "%m-%d-%Y",
     "YYYY-MM-DD": "%Y-%m-%d",
@@ -33,7 +36,7 @@ _DATE_FORMAT_REGEXES = {
 }
 
 
-def _strftime_pattern(date_format: str) -> str:
+def strftime_pattern(date_format: str) -> str:
     """Translate config.yaml's human date-format string into a strftime pattern."""
     try:
         return _DATE_FORMAT_PATTERNS[date_format]
@@ -100,6 +103,8 @@ class NightlyRun:
         minor_changes = 0
         scanned_count = 0
 
+        logger.info("Starting nightly run against %s (%s)", self._vault_root, "dry-run" if self._dry_run else "apply")
+
         run_label = start.strftime("nightly run %Y-%m-%d %H:%M")
         with self._git.bracket(run_label):
             delta = self._manifest.get_delta()
@@ -109,19 +114,28 @@ class NightlyRun:
                 if not self._is_daily_note(Path(p)) and str(p) != "AGENTS.md"
             ]
             scanned_count = len(note_paths)
+            logger.info("%d note(s) changed since the last run", scanned_count)
 
             for rel_path in note_paths:
+                logger.debug("Reorganizing %s", rel_path)
                 significant_item, flag, is_minor = self._process_note(str(rel_path))
                 if significant_item:
+                    logger.info("%s", significant_item["reason"])
                     significant_items.append(significant_item)
                 if flag:
+                    logger.warning("Flagged %s: %s", flag["title"], flag["reason"])
                     flags.append(flag)
                 if is_minor:
                     minor_changes += 1
 
+            logger.info("Digesting today's daily note, if present")
             digested_new, digested_merges = self._digest_today()
             new_notes.extend(digested_new)
             significant_items.extend(digested_merges)
+            if digested_new:
+                logger.info("Created %d new note(s) from today's daily note", len(digested_new))
+            if digested_merges:
+                logger.info("Merged %d chunk(s) into existing notes", len(digested_merges))
 
             self._maybe_rebuild_agents_md()
             self._manifest.commit()
@@ -142,6 +156,7 @@ class NightlyRun:
             report = generate_morning_report(stats, significant_items, new_notes, flags)
             self._write_report(report, end)
 
+        logger.info("Nightly run complete: %d changed, %d new, %d flagged", stats["changed"], stats["new"], len(flags))
         return report
 
     def _is_daily_note(self, rel_path: Path) -> bool:
@@ -207,7 +222,7 @@ class NightlyRun:
 
     def _digest_today(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Digest today's daily note if it exists; returns (new_note_items, merge_items)."""
-        date_str = datetime.now().strftime(_strftime_pattern(self._config.vault.daily_note_date_format))
+        date_str = datetime.now().strftime(strftime_pattern(self._config.vault.daily_note_date_format))
         daily_rel_path = _join_folder(self._config.vault.daily_notes_folder, f"{date_str}.md")
         if not self._vault.exists(daily_rel_path):
             return [], []
@@ -233,6 +248,7 @@ class NightlyRun:
         agents_md_exists = self._vault.exists("AGENTS.md")
         if not (self._taxonomy_changed or not agents_md_exists):
             return
+        logger.info("Rebuilding AGENTS.md (%s)", "taxonomy changed" if self._taxonomy_changed else "first run")
         existing = self._vault.read_raw("AGENTS.md") if agents_md_exists else None
         content = self._agents_builder.build(
             vault_name=self._vault_root.name,
@@ -243,13 +259,14 @@ class NightlyRun:
 
     def _write_report(self, report: str, end: datetime) -> None:
         """Write the morning report to _reports/, always live regardless of dry-run mode."""
-        date_str = end.strftime(_strftime_pattern(self._config.vault.daily_note_date_format))
+        date_str = end.strftime(strftime_pattern(self._config.vault.daily_note_date_format))
         report_rel_path = self._config.report.path.format(date=date_str)
         self._vault.write_raw(report_rel_path, report)
 
 
 def main() -> None:
     """Entry point: python -m src.jobs.nightly_run."""
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     config = load_config()
     dry_run = resolve_dry_run(config)
     vault_root = Path(config.vault.path)
@@ -263,12 +280,14 @@ def main() -> None:
             base_branch=config.git_review.base_branch,
             remote=config.git_review.remote,
         )
+        logger.info("Syncing review worktree onto %s (from %s/%s)", config.git_review.branch, config.git_review.remote, config.git_review.base_branch)
         vault_root = worktree.sync()
         dry_run = False  # the review branch itself is the staging area, not local _staging/
 
     NightlyRun(config, dry_run=dry_run, vault_root=vault_root).run()
 
     if worktree is not None:
+        logger.info("Pushing review branch %s", config.git_review.branch)
         worktree.push()
 
 
