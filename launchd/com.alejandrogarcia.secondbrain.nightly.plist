@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Install: copy to ~/Library/LaunchAgents/, then run:
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.alejandrogarcia.secondbrain.nightly.plist
+
+  Reload after edits:
+    launchctl bootout gui/$(id -u)/com.alejandrogarcia.secondbrain.nightly
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.alejandrogarcia.secondbrain.nightly.plist
+
+  Adjust the docker path below to match your install:
+    which docker
+  (commonly /usr/local/bin/docker or /Applications/Docker.app/Contents/Resources/bin/docker)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.alejandrogarcia.secondbrain.nightly</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/docker</string>
+        <string>compose</string>
+        <string>-f</string>
+        <string>/Users/macdealejo/Documents/Projects/second_brain/docker-compose.yml</string>
+        <string>run</string>
+        <string>--rm</string>
+        <string>worker</string>
+        <string>python</string>
+        <string>-m</string>
+        <string>src.jobs.nightly_run</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/macdealejo/Documents/Projects/second_brain</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>2</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/macdealejo/Documents/Projects/second_brain/logs/nightly.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/macdealejo/Documents/Projects/second_brain/logs/nightly.err.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>

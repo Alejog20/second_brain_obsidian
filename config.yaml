@@ -26,23 +26,28 @@ embeddings:
   store_path: /data/vector_store
 
 models:
-  # Route by task. Cheapest model that clears the quality bar for that task wins.
+  # Every task routes to the local Qwen 3.5 9B model served by Ollama --
+  # nothing leaves the machine. The table stays per-task on purpose: moving
+  # any single task to a cloud provider later (see
+  # SECOND_BRAIN_ARCHITECTURE.md, §7) is a one-line change here, not a
+  # code change -- llm_router.py currently only implements the "ollama"
+  # branch, so other providers need that implemented first.
   # provider: ollama | anthropic | deepseek | google | openai
   bulk_grammar_pass:
     provider: ollama
-    model: qwen3:14b
+    model: qwen3.5:9b
   title_and_tagging:
-    provider: anthropic
-    model: claude-haiku-4-5
+    provider: ollama
+    model: qwen3.5:9b
   daily_digestion:
-    provider: anthropic
-    model: claude-sonnet-5
+    provider: ollama
+    model: qwen3.5:9b
   taxonomy_analysis:
-    provider: anthropic
-    model: claude-opus-4-8       # run once per major reorg, not nightly
+    provider: ollama
+    model: qwen3.5:9b
   chat_agent:
-    provider: anthropic
-    model: claude-sonnet-5       # consumed by Copilot for Obsidian, not this pipeline directly
+    provider: ollama
+    model: qwen3.5:9b            # consumed by Copilot for Obsidian, not this pipeline directly
 
 cost_tracking:
   enabled: true
