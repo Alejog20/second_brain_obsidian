@@ -1,10 +1,13 @@
 """Git safety module: commit-before/after bracket for any apply-mode vault mutation."""
 
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
 from git import InvalidGitRepositoryError, Repo
+
+logger = logging.getLogger(__name__)
 
 
 class VaultNotAGitRepoError(Exception):
@@ -42,6 +45,7 @@ class GitSafety:
             return None
         self._repo.git.add(all=True)
         commit = self._repo.index.commit(message)
+        logger.info("Committed %s: %s", commit.hexsha[:8], message)
         return commit.hexsha
 
     @contextmanager

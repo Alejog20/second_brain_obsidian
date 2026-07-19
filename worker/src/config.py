@@ -12,11 +12,16 @@ DEFAULT_CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "config.yaml"))
 
 @dataclass(frozen=True)
 class VaultConfig:
-    """Vault location, daily-note conventions, and folders excluded from processing."""
+    """Vault location, daily-note conventions, and folders excluded from processing.
+
+    daily_notes_folder and default_new_note_folder are both "" by default, meaning
+    the vault root - not every vault uses a dated subfolder or an inbox folder.
+    """
 
     path: str
-    daily_notes_folder: str = "01-Daily"
+    daily_notes_folder: str = ""
     daily_note_date_format: str = "MM-DD-YYYY"
+    default_new_note_folder: str = ""
     excluded_folders: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -70,6 +75,18 @@ class ReportConfig:
 
 
 @dataclass(frozen=True)
+class GitReviewConfig:
+    """Optional PR-based review flow: the pipeline writes to a disposable branch via a git
+    worktree, never the vault's live checkout, so nothing changes locally until you merge."""
+
+    enabled: bool = False
+    remote: str = "origin"
+    branch: str = "second-brain/nightly"
+    base_branch: str = "main"
+    worktree_path: str = "/data/nightly_worktree"
+
+
+@dataclass(frozen=True)
 class Config:
     """The fully parsed, typed contents of config.yaml for a single pipeline run."""
 
@@ -79,6 +96,7 @@ class Config:
     models: dict[str, ModelTaskConfig]
     cost_tracking: CostTrackingConfig
     report: ReportConfig
+    git_review: GitReviewConfig
 
     def model_for(self, task_key: str) -> ModelTaskConfig:
         """Look up the provider/model configured for a pipeline task."""
@@ -100,8 +118,9 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     try:
         vault = VaultConfig(
             path=vault_raw["path"],
-            daily_notes_folder=vault_raw.get("daily_notes_folder", "01-Daily"),
+            daily_notes_folder=vault_raw.get("daily_notes_folder", ""),
             daily_note_date_format=vault_raw.get("daily_note_date_format", "MM-DD-YYYY"),
+            default_new_note_folder=vault_raw.get("default_new_note_folder", ""),
             excluded_folders=tuple(vault_raw.get("excluded_folders", [])),
         )
     except KeyError:
@@ -144,6 +163,15 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         include_cost_summary=report_raw.get("include_cost_summary", True),
     )
 
+    git_review_raw = raw.get("git_review", {})
+    git_review = GitReviewConfig(
+        enabled=git_review_raw.get("enabled", False),
+        remote=git_review_raw.get("remote", "origin"),
+        branch=git_review_raw.get("branch", "second-brain/nightly"),
+        base_branch=git_review_raw.get("base_branch", "main"),
+        worktree_path=git_review_raw.get("worktree_path", "/data/nightly_worktree"),
+    )
+
     return Config(
         vault=vault,
         safety=safety,
@@ -151,4 +179,5 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         models=models,
         cost_tracking=cost_tracking,
         report=report,
+        git_review=git_review,
     )

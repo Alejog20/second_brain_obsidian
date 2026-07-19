@@ -9,6 +9,8 @@ import httpx
 from .config import Config
 
 DEFAULT_OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+DEFAULT_GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+DEFAULT_GEMINI_HOST = "https://generativelanguage.googleapis.com"
 
 
 @dataclass(frozen=True)
@@ -65,12 +67,65 @@ class OllamaProvider:
         )
 
 
+class GeminiProvider:
+    """Cloud provider backed by Google's Gemini API.
+
+    Cost is always reported as 0.0 - this targets the free tier (see config.yaml), not a
+    calibrated per-token price. If you outgrow the free quota, that's no longer accurate;
+    this deliberately doesn't hardcode a paid rate that would just go stale.
+    """
+
+    def __init__(self, api_key: str = DEFAULT_GEMINI_API_KEY, host: str = DEFAULT_GEMINI_HOST, timeout: float = 60.0) -> None:
+        self._api_key = api_key
+        self._host = host.rstrip("/")
+        self._timeout = timeout
+
+    def generate(self, system: str, prompt: str, model: str) -> LLMResponse:
+        """Call Gemini's generateContent endpoint.
+
+        The API key goes in the x-goog-api-key header, never the URL - Gemini also accepts
+        it as a `?key=` query param, but query params are far more likely to end up copied
+        into logs, error messages, or shell history than headers are.
+        """
+        if not self._api_key:
+            raise ValueError("GEMINI_API_KEY is not set - required for the 'gemini' provider")
+        response = httpx.post(
+            f"{self._host}/v1beta/models/{model}:generateContent",
+            headers={"x-goog-api-key": self._api_key, "Content-Type": "application/json"},
+            json={
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "systemInstruction": {"parts": [{"text": system}]},
+            },
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        candidates = payload.get("candidates") or []
+        parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+        text = "".join(part.get("text", "") for part in parts)
+        usage = payload.get("usageMetadata", {})
+        return LLMResponse(
+            text=text,
+            tokens_in=usage.get("promptTokenCount", 0),
+            tokens_out=usage.get("candidatesTokenCount", 0),
+            cost_usd=0.0,
+        )
+
+
 class LLMRouter:
     """Routes each pipeline task to its configured provider/model and tracks cumulative cost."""
 
-    def __init__(self, config: Config, ollama_host: str = DEFAULT_OLLAMA_HOST) -> None:
+    def __init__(
+        self,
+        config: Config,
+        ollama_host: str = DEFAULT_OLLAMA_HOST,
+        gemini_api_key: str = DEFAULT_GEMINI_API_KEY,
+    ) -> None:
         self._config = config
-        self._providers: dict[str, LLMProvider] = {"ollama": OllamaProvider(host=ollama_host)}
+        self._providers: dict[str, LLMProvider] = {
+            "ollama": OllamaProvider(host=ollama_host),
+            "gemini": GeminiProvider(api_key=gemini_api_key),
+        }
         self._total_cost_usd = 0.0
 
     @property
