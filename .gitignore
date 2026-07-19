@@ -9,6 +9,10 @@ __pycache__/
 *.sqlite
 *.sqlite3
 *.egg-info/
+data/
+logs/
+API Key
 
 CLAUDE.md
 SECOND_BRAIN_ARQUITECHTURE.md
+*.txt

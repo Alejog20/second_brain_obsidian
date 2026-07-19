@@ -69,7 +69,7 @@ def test_segment_falls_back_to_paragraphs_without_headings() -> None:
 def test_create_new_note_for_unmatched_chunk(vault: VaultIO, vector_store: VectorStore) -> None:
     vault.write_note("01-Daily/07-16-2026.md", Note(metadata={}, content="# New Idea\nSome idea text."))
     router = FakeRouter({"daily_digestion": "My New Idea"})
-    digestor = Digestor(router, FakeEmbedder([1.0, 0.0, 0.0, 0.0]), vector_store, vault, dry_run=False)
+    digestor = Digestor(router, FakeEmbedder([1.0, 0.0, 0.0, 0.0]), vector_store, vault, dry_run=False, default_folder="00-Inbox")
 
     results = digestor.digest("01-Daily/07-16-2026.md", "07-16-2026")
 
@@ -90,7 +90,7 @@ def test_merge_into_existing_note_for_matched_chunk(vault: VaultIO, vector_store
     )
     vault.write_note("01-Daily/07-16-2026.md", Note(metadata={}, content="# Update\nMore about the existing topic."))
     router = FakeRouter({"daily_digestion": "Should not be called"})
-    digestor = Digestor(router, FakeEmbedder([1.0, 0.0, 0.0, 0.0]), vector_store, vault, dry_run=False)
+    digestor = Digestor(router, FakeEmbedder([1.0, 0.0, 0.0, 0.0]), vector_store, vault, dry_run=False, default_folder="00-Inbox")
 
     results = digestor.digest("01-Daily/07-16-2026.md", "07-16-2026")
 
@@ -107,7 +107,7 @@ def test_merge_into_existing_note_for_matched_chunk(vault: VaultIO, vector_store
 def test_daily_note_gets_notes_generated_section(vault: VaultIO, vector_store: VectorStore) -> None:
     vault.write_note("01-Daily/07-16-2026.md", Note(metadata={}, content="# New Idea\nSome idea text."))
     router = FakeRouter({"daily_digestion": "My New Idea"})
-    digestor = Digestor(router, FakeEmbedder([1.0, 0.0, 0.0, 0.0]), vector_store, vault, dry_run=False)
+    digestor = Digestor(router, FakeEmbedder([1.0, 0.0, 0.0, 0.0]), vector_store, vault, dry_run=False, default_folder="00-Inbox")
 
     digestor.digest("01-Daily/07-16-2026.md", "07-16-2026")
 
@@ -119,7 +119,7 @@ def test_daily_note_gets_notes_generated_section(vault: VaultIO, vector_store: V
 def test_dry_run_stages_new_note_instead_of_writing_live(vault: VaultIO, vector_store: VectorStore) -> None:
     vault.write_note("01-Daily/07-16-2026.md", Note(metadata={}, content="# New Idea\nSome idea text."))
     router = FakeRouter({"daily_digestion": "My New Idea"})
-    digestor = Digestor(router, FakeEmbedder([1.0, 0.0, 0.0, 0.0]), vector_store, vault, dry_run=True)
+    digestor = Digestor(router, FakeEmbedder([1.0, 0.0, 0.0, 0.0]), vector_store, vault, dry_run=True, default_folder="00-Inbox")
 
     digestor.digest("01-Daily/07-16-2026.md", "07-16-2026")
 
@@ -127,10 +127,21 @@ def test_dry_run_stages_new_note_instead_of_writing_live(vault: VaultIO, vector_
     assert vault.exists("_staging/00-Inbox/My-New-Idea.md")
 
 
+def test_default_folder_root_creates_note_at_vault_root(vault: VaultIO, vector_store: VectorStore) -> None:
+    vault.write_note("01-Daily/07-16-2026.md", Note(metadata={}, content="# New Idea\nSome idea text."))
+    router = FakeRouter({"daily_digestion": "My New Idea"})
+    digestor = Digestor(router, FakeEmbedder([1.0, 0.0, 0.0, 0.0]), vector_store, vault, dry_run=False, default_folder="")
+
+    results = digestor.digest("01-Daily/07-16-2026.md", "07-16-2026")
+
+    assert results[0].rel_path == "My-New-Idea.md"
+    assert vault.exists("My-New-Idea.md")
+
+
 def test_no_chunks_leaves_daily_note_untouched(vault: VaultIO, vector_store: VectorStore) -> None:
     vault.write_note("01-Daily/07-16-2026.md", Note(metadata={}, content=""))
     router = FakeRouter({})
-    digestor = Digestor(router, FakeEmbedder([1.0, 0.0, 0.0, 0.0]), vector_store, vault, dry_run=False)
+    digestor = Digestor(router, FakeEmbedder([1.0, 0.0, 0.0, 0.0]), vector_store, vault, dry_run=False, default_folder="00-Inbox")
 
     results = digestor.digest("01-Daily/07-16-2026.md", "07-16-2026")
 
@@ -148,7 +159,7 @@ def test_two_unrelated_chunks_with_same_proposed_title_do_not_collide(vault: Vau
             "# Idea Two\nSecond distinct idea.": [0.0, 1.0, 0.0, 0.0],
         }
     )
-    digestor = Digestor(router, embedder, vector_store, vault, dry_run=False)
+    digestor = Digestor(router, embedder, vector_store, vault, dry_run=False, default_folder="00-Inbox")
 
     results = digestor.digest("01-Daily/07-16-2026.md", "07-16-2026")
 
@@ -169,7 +180,7 @@ def test_collision_check_respects_dry_run_staging_path(vault: VaultIO, vector_st
             "# Idea Two\nSecond distinct idea.": [0.0, 1.0, 0.0, 0.0],
         }
     )
-    digestor = Digestor(router, embedder, vector_store, vault, dry_run=True)
+    digestor = Digestor(router, embedder, vector_store, vault, dry_run=True, default_folder="00-Inbox")
 
     results = digestor.digest("01-Daily/07-16-2026.md", "07-16-2026")
 
@@ -177,3 +188,21 @@ def test_collision_check_respects_dry_run_staging_path(vault: VaultIO, vector_st
     assert rel_paths == {"00-Inbox/My-New-Idea.md", "00-Inbox/My-New-Idea-2.md"}
     assert vault.exists("_staging/00-Inbox/My-New-Idea.md")
     assert vault.exists("_staging/00-Inbox/My-New-Idea-2.md")
+
+
+def test_collision_check_at_vault_root(vault: VaultIO, vector_store: VectorStore) -> None:
+    daily_content = "# Idea One\nFirst distinct idea.\n\n# Idea Two\nSecond distinct idea."
+    vault.write_note("01-Daily/07-16-2026.md", Note(metadata={}, content=daily_content))
+    router = FakeRouter({"daily_digestion": "My New Idea"})
+    embedder = VaryingEmbedder(
+        {
+            "# Idea One\nFirst distinct idea.": [1.0, 0.0, 0.0, 0.0],
+            "# Idea Two\nSecond distinct idea.": [0.0, 1.0, 0.0, 0.0],
+        }
+    )
+    digestor = Digestor(router, embedder, vector_store, vault, dry_run=False, default_folder="")
+
+    results = digestor.digest("01-Daily/07-16-2026.md", "07-16-2026")
+
+    rel_paths = {r.rel_path for r in results}
+    assert rel_paths == {"My-New-Idea.md", "My-New-Idea-2.md"}

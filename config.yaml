@@ -4,13 +4,13 @@
 
 vault:
   path: /vault
-  daily_notes_folder: "01-Daily"
+  daily_notes_folder: ""   # "" = vault root; daily notes (e.g. 07-18-2026.md) sit directly there
   daily_note_date_format: "MM-DD-YYYY"   # match Obsidian's Daily Notes / Periodic Notes plugin setting
+  default_new_note_folder: ""   # "" = vault root; where digested notes land with no clear topic match
   excluded_folders:
     - "_staging"
     - "_reports"
-    - "attachments"
-    - "templates"
+    - ".obsidian"
 
 safety:
   mode: dry_run              # dry_run | apply — start here, flip to apply once you trust the output
@@ -26,13 +26,14 @@ embeddings:
   store_path: /data/vector_store
 
 models:
-  # Every task routes to the local Qwen 3.5 9B model served by Ollama --
-  # nothing leaves the machine. The table stays per-task on purpose: moving
-  # any single task to a cloud provider later (see
-  # SECOND_BRAIN_ARCHITECTURE.md, §7) is a one-line change here, not a
-  # code change -- llm_router.py currently only implements the "ollama"
-  # branch, so other providers need that implemented first.
-  # provider: ollama | anthropic | deepseek | google | openai
+  # Routed per-task on purpose (see SECOND_BRAIN_ARCHITECTURE.md, §7): high-volume,
+  # mechanical tasks (grammar/titles - one call per changed note, every night) stay on
+  # local Ollama, since Gemini's free tier rate limits would throttle a bulk pass fast.
+  # daily_digestion is low-volume (a handful of calls, once a night, for today's entry
+  # only) and benefits most from a stronger model's judgment, so it's the one task
+  # routed to the Gemini free tier. llm_router.py implements both "ollama" and "gemini";
+  # other providers (anthropic, deepseek) are config-only stubs, not implemented yet.
+  # provider: ollama | gemini | anthropic | deepseek
   bulk_grammar_pass:
     provider: ollama
     model: qwen3.5:9b
@@ -40,11 +41,11 @@ models:
     provider: ollama
     model: qwen3.5:9b
   daily_digestion:
-    provider: ollama
-    model: qwen3.5:9b
+    provider: gemini
+    model: gemini-3.5-flash
   taxonomy_analysis:
     provider: ollama
-    model: qwen3.5:9b
+    model: qwen3.5:9b            # not yet called anywhere - taxonomy moves are pure embedding-distance today
   chat_agent:
     provider: ollama
     model: qwen3.5:9b            # consumed by Copilot for Obsidian, not this pipeline directly
@@ -57,3 +58,15 @@ report:
   path: "_reports/Review-{date}.md"
   full_diff_log_path: "_reports/{date}-full-diff.json"
   include_cost_summary: true
+
+git_review:
+  # When enabled, the pipeline never touches the vault's live checkout (what Obsidian has
+  # open). It writes into a separate git worktree on `branch`, rebuilt fresh from
+  # `base_branch`'s current tip every run, then force-pushes it - review the diff on GitHub
+  # and merge it yourself when you're ready. Needs a working git remote with push access
+  # (credentials come from the environment nightly_run.py runs in, not from this file).
+  enabled: true
+  remote: origin
+  branch: second-brain/nightly
+  base_branch: main
+  worktree_path: /data/nightly_worktree

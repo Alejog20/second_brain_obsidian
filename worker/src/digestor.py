@@ -40,7 +40,7 @@ class Digestor:
         vector_store: VectorStore,
         vault: VaultIO,
         dry_run: bool,
-        default_folder: str = "00-Inbox",
+        default_folder: str = "",
     ) -> None:
         self._router = router
         self._embedder = embedder
@@ -111,7 +111,9 @@ class Digestor:
     def _create_new_note(self, chunk_text: str, daily_note_date: str, vector: list[float]) -> DigestedChunk:
         """Create a new atomic note carrying the standard source/created/tags/status frontmatter."""
         title = self._propose_title(chunk_text)
-        rel_path = self._available_path(f"{self._default_folder}/{self._slugify(title)}.md")
+        filename = f"{self._slugify(title)}.md"
+        target = f"{self._default_folder}/{filename}" if self._default_folder else filename
+        rel_path = self._available_path(target)
         note = Note(
             metadata={
                 "title": title,

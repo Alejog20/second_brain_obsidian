@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from git import Repo
 
-from src.config import Config, CostTrackingConfig, EmbeddingsConfig, ModelTaskConfig, ReportConfig, SafetyConfig, VaultConfig
+from src.config import Config, CostTrackingConfig, EmbeddingsConfig, GitReviewConfig, ModelTaskConfig, ReportConfig, SafetyConfig, VaultConfig
 from src.git_safety import GitSafety
 from src.jobs.nightly_run import NightlyRun, resolve_dry_run
 from src.llm_router import LLMResponse
@@ -38,12 +38,19 @@ class FakeEmbedder:
         return self._vector
 
 
-def make_config(vault_root: Path, mode: str = "dry_run", materiality: str = "structural") -> Config:
+def make_config(
+    vault_root: Path,
+    mode: str = "dry_run",
+    materiality: str = "structural",
+    daily_notes_folder: str = "01-Daily",
+    default_new_note_folder: str = "00-Inbox",
+) -> Config:
     return Config(
         vault=VaultConfig(
             path=str(vault_root),
-            daily_notes_folder="01-Daily",
+            daily_notes_folder=daily_notes_folder,
             daily_note_date_format="MM-DD-YYYY",
+            default_new_note_folder=default_new_note_folder,
             excluded_folders=("_staging", "_reports"),
         ),
         safety=SafetyConfig(mode=mode, require_git=True, materiality_threshold=materiality),
@@ -55,6 +62,7 @@ def make_config(vault_root: Path, mode: str = "dry_run", materiality: str = "str
         },
         cost_tracking=CostTrackingConfig(enabled=True, currency="USD"),
         report=ReportConfig(path="_reports/Review-{date}.md", full_diff_log_path="_reports/{date}-full-diff.json", include_cost_summary=True),
+        git_review=GitReviewConfig(),
     )
 
 
@@ -73,8 +81,16 @@ def _make_run(
     router_responses: dict[str, str],
     embed_vector: list[float],
     materiality: str = "structural",
+    daily_notes_folder: str = "01-Daily",
+    default_new_note_folder: str = "00-Inbox",
 ) -> NightlyRun:
-    config = make_config(vault_root, mode=mode, materiality=materiality)
+    config = make_config(
+        vault_root,
+        mode=mode,
+        materiality=materiality,
+        daily_notes_folder=daily_notes_folder,
+        default_new_note_folder=default_new_note_folder,
+    )
     vault = VaultIO(vault_root)
     git = GitSafety(vault_root, require_git=True)
     router = FakeRouter(router_responses)
@@ -171,6 +187,70 @@ def test_daily_note_itself_is_not_reorganized(tmp_path: Path, vault_root: Path) 
     assert daily.metadata.get("title") == "Untitled"
 
 
+def test_root_based_vault_digests_daily_note_to_root(tmp_path: Path, vault_root: Path) -> None:
+    """Mirrors a real vault with no 01-Daily/ or 00-Inbox/ - daily notes and new notes both land at root."""
+    vault = VaultIO(vault_root)
+    today = datetime.now().strftime("%m-%d-%Y")
+    vault.write_note(f"{today}.md", Note(metadata={}, content="# New Idea\nSomething worth keeping."))
+
+    run = _make_run(
+        tmp_path,
+        vault_root,
+        "apply",
+        {"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE, "daily_digestion": "New Idea Note"},
+        [1.0, 0.0, 0.0, 0.0],
+        daily_notes_folder="",
+        default_new_note_folder="",
+    )
+    report = run.run()
+
+    assert vault.exists("New-Idea-Note.md")
+    assert "New Idea Note" in report
+    daily = vault.read_note(f"{today}.md")
+    assert "## Notes generated" in daily.content
+
+
+def test_root_based_vault_reorganizes_topic_folder_notes_normally(tmp_path: Path, vault_root: Path) -> None:
+    """A topic-folder note (e.g. AI/) is a regular note under a root-based layout too - it still gets reorganized."""
+    vault = VaultIO(vault_root)
+    vault.write_note("AI/existing-topic-note.md", Note(metadata={"title": "Untitled"}, content="teh existing note"))
+
+    run = _make_run(
+        tmp_path,
+        vault_root,
+        "apply",
+        {"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE, "title_and_tagging": "Existing Topic Note"},
+        [1.0, 0.0, 0.0, 0.0],
+        daily_notes_folder="",
+        default_new_note_folder="",
+    )
+    run.run()
+
+    updated = vault.read_note("AI/existing-topic-note.md")
+    assert updated.metadata["title"] == "Existing Topic Note"
+    assert updated.content == "Fixed text."
+
+
+def test_root_level_non_daily_note_is_still_reorganized(tmp_path: Path, vault_root: Path) -> None:
+    """A root-level file that ISN'T a dated daily note (e.g. a canvas-adjacent stray note) is still a regular note."""
+    vault = VaultIO(vault_root)
+    vault.write_note("random-root-note.md", Note(metadata={"title": "Untitled"}, content="teh idea"))
+
+    run = _make_run(
+        tmp_path,
+        vault_root,
+        "apply",
+        {"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE, "title_and_tagging": "A Real Title"},
+        [1.0, 0.0, 0.0, 0.0],
+        daily_notes_folder="",
+        default_new_note_folder="",
+    )
+    report = run.run()
+
+    assert vault.read_note("random-root-note.md").metadata["title"] == "A Real Title"
+    assert "1 notes scanned" in report
+
+
 def test_second_run_with_no_external_changes_reports_zero_scanned(tmp_path: Path, vault_root: Path) -> None:
     vault = VaultIO(vault_root)
     vault.write_note("00-Inbox/idea.md", Note(metadata={"title": "Untitled"}, content="teh idea"))
@@ -215,3 +295,40 @@ def test_report_file_written_to_reports_folder(tmp_path: Path, vault_root: Path)
 
     today = datetime.now().strftime("%m-%d-%Y")
     assert vault.read_raw(f"_reports/Review-{today}.md") == report
+
+
+def test_vault_root_override_propagates_to_default_constructed_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A regression test: NightlyRun's own ManifestManager must scan vault_root, not config.vault.path.
+
+    config.vault.path points somewhere that doesn't exist; if the manifest scanned that
+    instead of the vault_root override, ManifestManager's constructor would raise
+    FileNotFoundError immediately.
+    """
+    import src.manifest as manifest_module
+
+    monkeypatch.setattr(manifest_module, "DEFAULT_DB_PATH", tmp_path / "manifest.sqlite")
+
+    bogus_config_path = tmp_path / "does-not-exist"
+    real_vault = tmp_path / "actual-vault"
+    real_vault.mkdir()
+    Repo.init(real_vault)
+    vault = VaultIO(real_vault)
+    vault.write_note("00-Inbox/idea.md", Note(metadata={"title": "Untitled"}, content="teh idea"))
+
+    config = make_config(bogus_config_path, mode="apply")
+    run = NightlyRun(
+        config,
+        dry_run=False,
+        vault_root=real_vault,
+        vault=vault,
+        git=GitSafety(real_vault, require_git=True),
+        router=FakeRouter({"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE, "title_and_tagging": "A Real Title"}),
+        embedder=FakeEmbedder([1.0, 0.0, 0.0, 0.0]),
+        vector_store=VectorStore(tmp_path / "vector_store", embedding_dim=4),
+        # manifest intentionally NOT injected - exercises NightlyRun's own default construction
+    )
+    report = run.run()
+
+    assert not bogus_config_path.exists()
+    assert vault.read_note("00-Inbox/idea.md").metadata["title"] == "A Real Title"
+    assert "1 notes scanned" in report

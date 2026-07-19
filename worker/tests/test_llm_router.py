@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from src.config import load_config
-from src.llm_router import LLMRouter, UnsupportedProviderError
+from src.llm_router import GeminiProvider, LLMRouter, UnsupportedProviderError
 
 CONFIG_YAML = """
 vault:
@@ -21,6 +21,9 @@ models:
   bulk_grammar_pass:
     provider: ollama
     model: qwen3.5:9b
+  daily_digestion:
+    provider: gemini
+    model: gemini-3.5-flash
   taxonomy_analysis:
     provider: anthropic
     model: claude-opus-4-8
@@ -78,3 +81,65 @@ def test_unknown_task_key_raises(config) -> None:
     router = LLMRouter(config)
     with pytest.raises(ValueError):
         router.generate("nonexistent_task", system="", prompt="")
+
+
+def _fake_gemini_response(*args: Any, **kwargs: Any) -> httpx.Response:
+    return httpx.Response(
+        status_code=200,
+        json={
+            "candidates": [{"content": {"parts": [{"text": "distilled title"}], "role": "model"}}],
+            "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 4, "totalTokenCount": 16},
+        },
+        request=httpx.Request("POST", "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"),
+    )
+
+
+def test_generate_dispatches_to_gemini_and_parses_response(monkeypatch: pytest.MonkeyPatch, config) -> None:
+    monkeypatch.setattr(httpx, "post", _fake_gemini_response)
+    router = LLMRouter(config, gemini_api_key="test-key")
+
+    result = router.generate("daily_digestion", system="title this", prompt="some journal text")
+
+    assert result.text == "distilled title"
+    assert result.tokens_in == 12
+    assert result.tokens_out == 4
+    assert result.cost_usd == 0.0
+
+
+def test_gemini_api_key_sent_as_header_not_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_post(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        captured["url"] = url
+        captured["headers"] = kwargs.get("headers", {})
+        return _fake_gemini_response()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = GeminiProvider(api_key="super-secret-key")
+
+    provider.generate(system="", prompt="hi", model="gemini-3.5-flash")
+
+    assert "super-secret-key" not in captured["url"]
+    assert captured["headers"]["x-goog-api-key"] == "super-secret-key"
+
+
+def test_gemini_missing_api_key_raises_clearly() -> None:
+    provider = GeminiProvider(api_key="")
+    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+        provider.generate(system="", prompt="hi", model="gemini-3.5-flash")
+
+
+def test_gemini_empty_candidates_returns_empty_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_post(*args: Any, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            json={"promptFeedback": {"blockReason": "SAFETY"}},
+            request=httpx.Request("POST", "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent"),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = GeminiProvider(api_key="test-key")
+
+    result = provider.generate(system="", prompt="hi", model="gemini-3.5-flash")
+
+    assert result.text == ""
