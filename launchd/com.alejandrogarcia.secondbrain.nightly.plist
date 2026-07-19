@@ -22,17 +22,17 @@
         <string>/usr/local/bin/docker</string>
         <string>compose</string>
         <string>-f</string>
-        <string>/Users/alejandro/second-brain/docker-compose.yml</string>
+        <string>/Users/macdealejo/Documents/Projects/second_brain/docker-compose.yml</string>
         <string>run</string>
         <string>--rm</string>
         <string>worker</string>
         <string>python</string>
         <string>-m</string>
-        <string>jobs.nightly_run</string>
+        <string>src.jobs.nightly_run</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/alejandro/second-brain</string>
+    <string>/Users/macdealejo/Documents/Projects/second_brain</string>
 
     <key>StartCalendarInterval</key>
     <dict>
@@ -43,10 +43,10 @@
     </dict>
 
     <key>StandardOutPath</key>
-    <string>/Users/alejandro/second-brain/logs/nightly.out.log</string>
+    <string>/Users/macdealejo/Documents/Projects/second_brain/logs/nightly.out.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/alejandro/second-brain/logs/nightly.err.log</string>
+    <string>/Users/macdealejo/Documents/Projects/second_brain/logs/nightly.err.log</string>
 
     <key>RunAtLoad</key>
     <false/>

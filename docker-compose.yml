@@ -1,7 +1,7 @@
 # Second Brain — worker service
 #
 # This container is invoked on-demand by launchd (see the .plist file), e.g.:
-#   docker compose run --rm worker python -m jobs.nightly_run
+#   docker compose run --rm worker python -m src.jobs.nightly_run
 #
 # It intentionally has no long-running command, so `docker compose up` does
 # nothing by itself — that's expected. Ollama is NOT a service here: on
@@ -17,6 +17,7 @@ services:
       - ${VAULT_PATH}:/vault
       - ./data:/data
       - ./logs:/logs
+      - ./config.yaml:/data/config.yaml:ro
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}

@@ -1,66 +1,122 @@
-from typing import Dict, List, Optional, Any
-from .llm_router import get_model_config
+"""Reorganizer module: per-note title, grammar/clarity, taxonomy, and link pipeline (requirement 1)."""
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from .llm_router import Router
+from .vault_io import Note
+from .vector_store import EmbeddedChunk, Embedder, VectorStore
+
+GENERIC_TITLES = {"untitled", "note", "new note", "daily note", ""}
+SEARCH_LIMIT = 5
+# Placeholder confidence bars on LanceDB L2 distance; not yet calibrated against a real vault.
+TAXONOMY_CONFIDENCE_DISTANCE = 0.35
+LINK_SUGGESTION_DISTANCE = 0.45
+
+GRAMMAR_SYSTEM_PROMPT = (
+    "You copyedit personal notes. Fix spelling and grammar only - preserve the author's voice, "
+    "structure, and meaning exactly. Never add content that isn't already implied by the text.\n"
+    "Respond in exactly this format:\n"
+    "---CORRECTED---\n<corrected note text>\n---CLARITY---\nclear\n"
+    "or, if the note's core idea doesn't come through clearly:\n"
+    "---CORRECTED---\n<corrected note text>\n---CLARITY---\nunclear: <one short reason>"
+)
+
+TITLE_SYSTEM_PROMPT = (
+    "You title personal knowledge-base notes. Read the note body and respond with only a short, "
+    "descriptive title in plain text - no quotes, no trailing punctuation, no explanation."
+)
+
+
+@dataclass(frozen=True)
+class ReorganizeResult:
+    """Proposed edits and review flags for a single note; nothing here has touched the vault yet."""
+
+    title: str
+    content: str
+    suggested_folder: Optional[str] = None
+    suggested_links: tuple[str, ...] = ()
+    flags: tuple[str, ...] = ()
+
 
 class Reorganizer:
-    """
-    Handles the reorganization of notes including title checks, 
-    grammar/clarity improvements, taxonomy placement, and link suggestions.
-    """
-    def __init__(self):
-        pass
+    """Computes title/grammar/taxonomy/link proposals for one note; never writes to the vault."""
 
-    def process_note(self, note_content: str, metadata: Dict) -> Dict[str, Any]:
-        """
-        Runs the reorganization pipeline for a single note.
-        
-        Args:
-            note_content: The raw text of the note.
-            metadata: Metadata about the note (e.g., current title, path).
-            
-        Returns:
-            A dictionary containing the proposed changes and any flags for manual review.
-        """
-        results = {
-            "title": metadata.get("title", "Untitled"),
-            "content": note_content,
-            "suggestions": [],
-            "flags": []
-        }
+    def __init__(self, router: Router, embedder: Embedder, vector_store: VectorStore) -> None:
+        self._router = router
+        self._embedder = embedder
+        self._vector_store = vector_store
 
-        # 1. Title Check & Improvement
-        # Uses 'title_and_tagging' model configuration via the router.
-        title_cfg = get_model_config("title_and_tagging")
-        results["title"] = self._improve_title(note_content, results["title"], title_cfg)
+    def reorganize(self, rel_path: str, note: Note) -> ReorganizeResult:
+        """Run the full pipeline for one note and return proposed changes."""
+        flags: list[str] = []
 
-        # 2. Grammar & Clarity Pass
-        # Uses 'bulk_grammar_pass' model configuration.
-        grammar_cfg = get_model_config("bulk_grammar_pass")
-        result_text, is_clear = self._improve_grammar(note_content, grammar_cfg)
-        results["content"] = result_text
+        title = self._improve_title(note.metadata.get("title"), note.content)
+        content, is_clear, clarity_reason = self._improve_grammar(note.content)
         if not is_clear:
-            results["flags"].append("low_clarity_warning")
+            flags.append(f"low_clarity: {clarity_reason}" if clarity_reason else "low_clarity")
 
-        # 3. Taxonomy & Link Suggestions (logic placeholders for integration with vector store/embeddings)
-        # These are currently flagged as 'suggestion' items.
-        self._suggest_links(note_content, results)
+        vector = self._embedder.embed(content)
+        folder = self._suggest_taxonomy(rel_path, vector)
+        links = self._suggest_links(rel_path, vector)
 
-        return results
+        self._vector_store.upsert(
+            EmbeddedChunk(id=rel_path, text=content, vector=vector, path=rel_path, note_title=title)
+        )
 
-    def _improve_title(self, content: str, current_title: str, config: Dict) -> str:
-        """Check if title is missing or misleading and suggest a better one."""
-        # Implementation would call the LLM using configuration from `config.yaml`
-        return current_title
+        return ReorganizeResult(
+            title=title,
+            content=content,
+            suggested_folder=folder,
+            suggested_links=tuple(links),
+            flags=tuple(flags),
+        )
 
-    def _improve_grammar(self, content: str, config: Dict) -> (str, bool):
-        """Fix grammar/clarity errors without changing user's voice."""
-        # Returns (updated_content, is_clearly_understood)
-        return content, True
+    def _improve_title(self, current_title: Optional[str], content: str) -> str:
+        """Propose a better title only if the current one is missing or generic."""
+        if current_title and current_title.strip().lower() not in GENERIC_TITLES:
+            return current_title
+        response = self._router.generate("title_and_tagging", system=TITLE_SYSTEM_PROMPT, prompt=content)
+        proposed = response.text.strip().strip('"').strip()
+        return proposed or (current_title or "Untitled")
 
-    def _suggest_links(self, content: str, results: Dict):
-        """Suggest [[wikilinks]] based on internal similarity."""
-        pass
+    def _improve_grammar(self, content: str) -> tuple[str, bool, Optional[str]]:
+        """Fix genuine grammar errors without rewriting voice; flag (don't fix) unclear notes."""
+        response = self._router.generate("bulk_grammar_pass", system=GRAMMAR_SYSTEM_PROMPT, prompt=content)
+        return self._parse_grammar_response(response.text, fallback=content)
 
-reorganizer = Reorganizer()
+    @staticmethod
+    def _parse_grammar_response(raw: str, fallback: str) -> tuple[str, bool, Optional[str]]:
+        """Parse the corrected-text/clarity-verdict format; fail safe to the original text if malformed."""
+        if "---CORRECTED---" not in raw or "---CLARITY---" not in raw:
+            return fallback, False, "grammar_pass_response_unparseable"
+        _, _, rest = raw.partition("---CORRECTED---")
+        corrected, _, clarity_block = rest.partition("---CLARITY---")
+        corrected = corrected.strip()
+        clarity_block = clarity_block.strip().lower()
+        if not corrected:
+            return fallback, False, "grammar_pass_response_unparseable"
+        if clarity_block.startswith("clear"):
+            return corrected, True, None
+        reason = clarity_block[len("unclear:"):].strip() if clarity_block.startswith("unclear:") else None
+        return corrected, False, reason or "unclear"
 
-def reorganize_note(content: str, metadata: Dict) -> Dict[str, Any]:
-    return reorganizer.process_note(content, metadata)
+    def _suggest_taxonomy(self, rel_path: str, vector: list[float]) -> Optional[str]:
+        """Suggest a different top-level folder only when a close neighbor already lives there."""
+        current_folder = Path(rel_path).parts[0] if Path(rel_path).parts else ""
+        for match in self._vector_store.search(vector, limit=SEARCH_LIMIT):
+            if match.path == rel_path:
+                continue
+            neighbor_folder = Path(match.path).parts[0] if Path(match.path).parts else ""
+            if neighbor_folder and neighbor_folder != current_folder and match.distance <= TAXONOMY_CONFIDENCE_DISTANCE:
+                return neighbor_folder
+        return None
+
+    def _suggest_links(self, rel_path: str, vector: list[float]) -> list[str]:
+        """Propose wikilinks to semantically related notes; never inserted into content automatically."""
+        return [
+            match.note_title
+            for match in self._vector_store.search(vector, limit=SEARCH_LIMIT)
+            if match.path != rel_path and match.distance <= LINK_SUGGESTION_DISTANCE
+        ]

@@ -3,7 +3,12 @@
 
 .xlsx
 .csv
-.pycache
+__pycache__/
+*.pyc
+.pytest_cache/
+*.sqlite
+*.sqlite3
+*.egg-info/
 
 CLAUDE.md
 SECOND_BRAIN_ARQUITECHTURE.md
