@@ -17,11 +17,13 @@ from ..llm_router import LLMRouter, Router
 from ..manifest import ManifestManager
 from ..reorganizer import Reorganizer
 from ..report import generate_morning_report
-from ..vault_io import Note, VaultIO
-from ..vector_store import Embedder, OllamaEmbeddingClient, VectorStore
+from ..vault_io import Note, PathBlockedByFileError, VaultIO
+from ..vector_store import Embedder, GeminiEmbeddingClient, OllamaEmbeddingClient, VectorStore
 from ..worktree import NightlyWorktree
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_DATA_PATH = Path(os.environ.get("DATA_PATH", "data"))
 
 _DATE_FORMAT_PATTERNS = {
     "MM-DD-YYYY": "%m-%d-%Y",
@@ -47,6 +49,15 @@ def strftime_pattern(date_format: str) -> str:
 def _join_folder(folder: str, filename: str) -> str:
     """Join an optional folder prefix with a filename; folder="" means the vault root."""
     return f"{folder}/{filename}" if folder else filename
+
+
+def _build_default_embedder(config: Config) -> Embedder:
+    """Construct the embedder config.yaml's embeddings.provider actually asks for."""
+    if config.embeddings.provider == "gemini":
+        return GeminiEmbeddingClient(model=config.embeddings.model)
+    if config.embeddings.provider == "ollama":
+        return OllamaEmbeddingClient(model=config.embeddings.model)
+    raise ValueError(f"unsupported embeddings provider: {config.embeddings.provider}")
 
 
 def resolve_dry_run(config: Config) -> bool:
@@ -76,8 +87,8 @@ class NightlyRun:
         self._vault = vault or VaultIO(self._vault_root)
         self._git = git or GitSafety(self._vault_root, require_git=config.safety.require_git)
         self._router = router or LLMRouter(config)
-        self._embedder = embedder or OllamaEmbeddingClient(model=config.embeddings.model)
-        self._vector_store = vector_store or VectorStore(Path(config.embeddings.store_path))
+        self._embedder = embedder or _build_default_embedder(config)
+        self._vector_store = vector_store or VectorStore(DEFAULT_DATA_PATH / "vector_store")
         self._manifest = manifest or ManifestManager(
             vault_path=str(self._vault_root), excluded_folders=list(config.vault.excluded_folders)
         )
@@ -195,30 +206,33 @@ class NightlyRun:
 
         updated_note = Note(metadata={**note.metadata, "title": result.title}, content=result.content)
 
-        if result.suggested_folder:
-            new_rel_path = f"{result.suggested_folder}/{Path(rel_path).name}"
-            self._vault.move_note(rel_path, new_rel_path, updated_note, dry_run=self._dry_run)
-            self._taxonomy_changed = True
-            item = {
-                "reason": f"Moved {Path(rel_path).name} to {result.suggested_folder}",
-                "detail": f"High embedding similarity to existing notes already in {result.suggested_folder}.",
-            }
-            return item, None, False
-
-        if result.flags:
-            self._vault.write_or_stage(rel_path, updated_note, dry_run=self._dry_run)
-            flag = {"title": result.title, "reason": "; ".join(result.flags)}
-            return None, flag, False
-
-        changed = updated_note.content != note.content or result.title != note.metadata.get("title")
-        if changed:
-            self._vault.write_or_stage(rel_path, updated_note, dry_run=self._dry_run)
-            if self._materiality_any:
-                item = {"reason": f"Grammar/title tidy-up: {rel_path}", "detail": f"Title: {result.title}"}
+        try:
+            if result.suggested_folder:
+                new_rel_path = f"{result.suggested_folder}/{Path(rel_path).name}"
+                self._vault.move_note(rel_path, new_rel_path, updated_note, dry_run=self._dry_run)
+                self._taxonomy_changed = True
+                item = {
+                    "reason": f"Moved {Path(rel_path).name} to {result.suggested_folder}",
+                    "detail": f"High embedding similarity to existing notes already in {result.suggested_folder}.",
+                }
                 return item, None, False
-            return None, None, True
 
-        return None, None, False
+            if result.flags:
+                self._vault.write_or_stage(rel_path, updated_note, dry_run=self._dry_run)
+                flag = {"title": result.title, "reason": "; ".join(result.flags)}
+                return None, flag, False
+
+            changed = updated_note.content != note.content or result.title != note.metadata.get("title")
+            if changed:
+                self._vault.write_or_stage(rel_path, updated_note, dry_run=self._dry_run)
+                if self._materiality_any:
+                    item = {"reason": f"Grammar/title tidy-up: {rel_path}", "detail": f"Title: {result.title}"}
+                    return item, None, False
+                return None, None, True
+
+            return None, None, False
+        except PathBlockedByFileError as exc:
+            return None, {"title": rel_path, "reason": f"could not apply changes: {exc}"}, False
 
     def _digest_today(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Digest today's daily note if it exists; returns (new_note_items, merge_items)."""

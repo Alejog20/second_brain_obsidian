@@ -1,0 +1,80 @@
+# Second Brain configuration
+# Copy to config.yaml and edit. Paths below are as seen INSIDE the worker
+# container (see docker-compose.yml volume mounts).
+
+vault:
+  path: /vault
+  daily_notes_folder: ""   # "" = vault root; daily notes (e.g. 07-18-2026.md) sit directly there
+  daily_note_date_format: "YYYY-MM-DD"   # match Obsidian's Daily Notes / Periodic Notes plugin setting - verified against the real vault's actual daily note filenames (e.g. 2026-07-18.md)
+  default_new_note_folder: ""   # "" = vault root; where digested notes land with no clear topic match
+  excluded_folders:
+    - "_staging"
+    - "_reports"
+    - ".obsidian"
+
+safety:
+  mode: dry_run              # dry_run | apply — start here, flip to apply once you trust the output
+  require_git: true          # refuse to run if the vault isn't a git repo
+  materiality_threshold: structural   # structural | any
+  # structural = only renames, merges, taxonomy moves, deletions get full writeups
+  # any        = every edit gets a full writeup (noisy, use briefly if you want to audit closely)
+
+embeddings:
+  provider: gemini             # ollama | gemini
+  model: gemini-embedding-001  # truncated to 768 dims in code (vector_store.py) to match the LanceDB schema
+  store: lancedb                # lancedb | chroma
+  # store_path is not read directly - the vector store always lives at $DATA_PATH/vector_store
+  # (same convention as the manifest DB), so it works both in-container (DATA_PATH=/data) and
+  # locally (DATA_PATH unset -> defaults to ./data/vector_store, relative to wherever you run
+  # `second-brain` from). Set DATA_PATH in .env to override.
+  store_path: /data/vector_store
+
+models:
+  # Everything routes to Gemini's free tier - deliberate choice over local Ollama (see
+  # SECOND_BRAIN_ARCHITECTURE.md, §7 for the original reasoning behind splitting bulk
+  # tasks onto a local model): running qwen3.5:9b locally kept a MacBook Air's fans at
+  # full tilt for the duration of every run, which mattered more than the free-tier
+  # rate-limit risk this creates for high-volume tasks (bulk_grammar_pass/title_and_tagging
+  # fire once per changed note, every run). If a real run starts hitting 429s, those
+  # notes come back as flagged "reorganize failed" items in the report rather than
+  # crashing the run (see nightly_run.py's httpx.HTTPError handling) - not silent, but
+  # worth watching if you're processing many notes at once.
+  # llm_router.py implements both "ollama" and "gemini"; other providers (anthropic,
+  # deepseek) are config-only stubs, not implemented yet.
+  # provider: ollama | gemini | anthropic | deepseek
+  bulk_grammar_pass:
+    provider: gemini
+    model: gemini-3.5-flash
+  title_and_tagging:
+    provider: gemini
+    model: gemini-3.5-flash
+  daily_digestion:
+    provider: gemini
+    model: gemini-3.5-flash
+  taxonomy_analysis:
+    provider: gemini
+    model: gemini-3.5-flash      # not yet called anywhere - taxonomy moves are pure embedding-distance today
+  chat_agent:
+    provider: gemini
+    model: gemini-3.5-flash      # consumed by Copilot for Obsidian, not this pipeline directly
+
+cost_tracking:
+  enabled: true
+  currency: USD
+
+report:
+  path: "_reports/Review-{date}.md"
+  full_diff_log_path: "_reports/{date}-full-diff.json"
+  include_cost_summary: true
+
+git_review:
+  # When enabled, the pipeline never touches the vault's live checkout (what Obsidian has
+  # open). It writes into a separate git worktree on `branch`, rebuilt fresh from
+  # `base_branch`'s current tip every run, then force-pushes it - review the diff on GitHub
+  # and merge it yourself when you're ready. Needs a working git remote with push access
+  # (credentials come from the environment nightly_run.py runs in, not from this file).
+  enabled: true
+  remote: origin
+  branch: second-brain/nightly
+  base_branch: main
+  worktree_path: /data/nightly_worktree

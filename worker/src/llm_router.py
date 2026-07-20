@@ -111,6 +111,24 @@ class GeminiProvider:
             cost_usd=0.0,
         )
 
+    def list_models(self) -> list[str]:
+        """List available Gemini models.
+
+        A lightweight, free call (no generation quota consumed) used purely to verify the
+        API key is set and valid - the CLI's `check` command uses this rather than a real
+        generateContent call.
+        """
+        if not self._api_key:
+            raise ValueError("GEMINI_API_KEY is not set - required for the 'gemini' provider")
+        response = httpx.get(
+            f"{self._host}/v1beta/models",
+            headers={"x-goog-api-key": self._api_key},
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return [model.get("name", "") for model in payload.get("models", [])]
+
 
 class LLMRouter:
     """Routes each pipeline task to its configured provider/model and tracks cumulative cost."""

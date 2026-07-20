@@ -17,7 +17,7 @@ services:
       - ${VAULT_PATH}:/vault
       - ./data:/data
       - ./logs:/logs
-      - ./config.yaml:/data/config.yaml:ro
+      - ./worker/config.yaml:/data/config.yaml:ro
     environment:
       - GEMINI_API_KEY=${GEMINI_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}

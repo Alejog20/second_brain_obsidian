@@ -1,4 +1,4 @@
-"""Vector store module: local embeddings (Ollama) backed by an embedded LanceDB table."""
+"""Vector store module: embeddings (Ollama or Gemini) backed by an embedded LanceDB table."""
 
 import os
 from dataclasses import dataclass
@@ -10,10 +10,12 @@ import lancedb
 import pyarrow as pa
 
 DEFAULT_OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+DEFAULT_GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+DEFAULT_GEMINI_HOST = "https://generativelanguage.googleapis.com"
 
 
 class Embedder(Protocol):
-    """Structural interface satisfied by OllamaEmbeddingClient; lets pipeline modules take a fake in tests."""
+    """Structural interface satisfied by OllamaEmbeddingClient/GeminiEmbeddingClient; lets pipeline modules take a fake in tests."""
 
     def embed(self, text: str) -> list[float]:
         """Return an embedding vector for a piece of text."""
@@ -59,6 +61,42 @@ class OllamaEmbeddingClient:
         )
         response.raise_for_status()
         return response.json()["embedding"]
+
+
+class GeminiEmbeddingClient:
+    """Generates text embeddings via Google's Gemini API.
+
+    gemini-embedding-001 outputs 3072 dims natively; requesting outputDimensionality truncates
+    it (Matryoshka representation - the truncated vector is still a valid, meaningful embedding,
+    not a naive slice) down to 768 to match VectorStore's default schema.
+    """
+
+    def __init__(
+        self,
+        api_key: str = DEFAULT_GEMINI_API_KEY,
+        model: str = "gemini-embedding-001",
+        host: str = DEFAULT_GEMINI_HOST,
+        output_dim: int = 768,
+        timeout: float = 30.0,
+    ) -> None:
+        self._api_key = api_key
+        self._model = model
+        self._host = host.rstrip("/")
+        self._output_dim = output_dim
+        self._timeout = timeout
+
+    def embed(self, text: str) -> list[float]:
+        """Request an embedding vector via Gemini's embedContent endpoint."""
+        if not self._api_key:
+            raise ValueError("GEMINI_API_KEY is not set - required for the 'gemini' embeddings provider")
+        response = httpx.post(
+            f"{self._host}/v1beta/models/{self._model}:embedContent",
+            headers={"x-goog-api-key": self._api_key, "Content-Type": "application/json"},
+            json={"content": {"parts": [{"text": text}]}, "outputDimensionality": self._output_dim},
+            timeout=self._timeout,
+        )
+        response.raise_for_status()
+        return response.json()["embedding"]["values"]
 
 
 def _escape_literal(value: str) -> str:

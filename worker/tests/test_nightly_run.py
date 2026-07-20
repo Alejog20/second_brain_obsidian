@@ -1,5 +1,6 @@
 """Integration tests for the nightly orchestrator: manifest -> reorganize -> digest -> AGENTS.md -> report."""
 
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -8,11 +9,11 @@ from git import Repo
 
 from src.config import Config, CostTrackingConfig, EmbeddingsConfig, GitReviewConfig, ModelTaskConfig, ReportConfig, SafetyConfig, VaultConfig
 from src.git_safety import GitSafety
-from src.jobs.nightly_run import NightlyRun, resolve_dry_run
+from src.jobs.nightly_run import NightlyRun, _build_default_embedder, resolve_dry_run
 from src.llm_router import LLMResponse
 from src.manifest import ManifestManager
 from src.vault_io import Note, VaultIO
-from src.vector_store import EmbeddedChunk, VectorStore
+from src.vector_store import EmbeddedChunk, GeminiEmbeddingClient, OllamaEmbeddingClient, VectorStore
 
 CLEAR_GRAMMAR_RESPONSE = "---CORRECTED---\nFixed text.\n---CLARITY---\nclear"
 
@@ -64,6 +65,22 @@ def make_config(
         report=ReportConfig(path="_reports/Review-{date}.md", full_diff_log_path="_reports/{date}-full-diff.json", include_cost_summary=True),
         git_review=GitReviewConfig(),
     )
+
+
+def test_build_default_embedder_selects_gemini(tmp_path: Path) -> None:
+    config = replace(make_config(tmp_path), embeddings=EmbeddingsConfig(provider="gemini", model="gemini-embedding-001", store="lancedb", store_path="/data/vector_store"))
+    assert isinstance(_build_default_embedder(config), GeminiEmbeddingClient)
+
+
+def test_build_default_embedder_selects_ollama(tmp_path: Path) -> None:
+    config = replace(make_config(tmp_path), embeddings=EmbeddingsConfig(provider="ollama", model="nomic-embed-text", store="lancedb", store_path="/data/vector_store"))
+    assert isinstance(_build_default_embedder(config), OllamaEmbeddingClient)
+
+
+def test_build_default_embedder_rejects_unknown_provider(tmp_path: Path) -> None:
+    config = replace(make_config(tmp_path), embeddings=EmbeddingsConfig(provider="voyage", model="x", store="lancedb", store_path="/data/vector_store"))
+    with pytest.raises(ValueError, match="unsupported embeddings provider"):
+        _build_default_embedder(config)
 
 
 @pytest.fixture
@@ -332,3 +349,32 @@ def test_vault_root_override_propagates_to_default_constructed_manifest(tmp_path
     assert not bogus_config_path.exists()
     assert vault.read_note("00-Inbox/idea.md").metadata["title"] == "A Real Title"
     assert "1 notes scanned" in report
+
+
+def test_default_constructed_vector_store_uses_data_path_env_var_not_config(
+    tmp_path: Path, vault_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A regression test: the default VectorStore must come from $DATA_PATH, not config.yaml's
+    embeddings.store_path (which is /data/vector_store - unwritable outside a container)."""
+    import src.jobs.nightly_run as nightly_run_module
+
+    data_path = tmp_path / "local-data"
+    monkeypatch.setattr(nightly_run_module, "DEFAULT_DATA_PATH", data_path)
+
+    vault = VaultIO(vault_root)
+    vault.write_note("00-Inbox/idea.md", Note(metadata={"title": "Untitled"}, content="teh idea"))
+
+    config = make_config(vault_root, mode="apply")
+    run = NightlyRun(
+        config,
+        dry_run=False,
+        vault=vault,
+        git=GitSafety(vault_root, require_git=True),
+        router=FakeRouter({"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE, "title_and_tagging": "A Real Title"}),
+        embedder=FakeEmbedder([1.0] + [0.0] * 767),  # matches VectorStore's default embedding_dim=768
+        manifest=ManifestManager(vault_path=str(vault_root), excluded_folders=["_staging", "_reports"], db_path=tmp_path / "manifest.sqlite"),
+        # vector_store intentionally NOT injected - exercises NightlyRun's own default construction
+    )
+    run.run()
+
+    assert (data_path / "vector_store").is_dir()
