@@ -1,9 +1,23 @@
 """CLI module: a Rich-powered command-line utility for running the Second Brain pipeline."""
 
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env before any other project module is imported. llm_router.py, config.py, etc. all
+# read environment variables at *import time* (module-level DEFAULT_* constants, some used as
+# frozen default parameter values) - loading .env any later, e.g. inside main() below, would
+# be after those values are already bound and wouldn't take effect. Only the CLI needs this:
+# the Docker/launchd entry point (jobs/nightly_run.py) already gets its env from
+# docker-compose.yml's own `.env` substitution before the process even starts.
+_worker_root = Path(__file__).resolve().parent.parent
+for _env_candidate in (_worker_root / ".env", _worker_root.parent / ".env"):
+    if _env_candidate.is_file():
+        load_dotenv(_env_candidate, override=False)
+
 import logging
 import os
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -16,6 +30,7 @@ from rich.table import Table
 from .config import Config, load_config
 from .git_safety import GitSafety, VaultNotAGitRepoError
 from .jobs.nightly_run import NightlyRun, resolve_dry_run, strftime_pattern
+from .llm_router import GeminiProvider
 from .vault_io import VaultIO
 from .worktree import NightlyWorktree
 
@@ -57,10 +72,29 @@ def _load_config_or_exit(config_path: Optional[Path]) -> Config:
         raise typer.Exit(code=1)
 
 
+_VAULT_OPTION_HELP = "Vault path for this command. Falls back to $VAULT_PATH, then config.yaml's vault.path."
+vault_option = typer.Option(None, "--vault", help=_VAULT_OPTION_HELP)
+
+
+def _resolve_vault_root(vault: Optional[Path], config: Config) -> Path:
+    """Resolve the vault path: --vault flag > VAULT_PATH env var > config.yaml's vault.path.
+
+    config.yaml's vault.path is typically /vault (the in-container Docker mount point),
+    which doesn't exist when running locally - VAULT_PATH lets a local run point at the
+    real path without editing config.yaml or passing --vault every time.
+    """
+    if vault is not None:
+        return vault
+    env_vault = os.environ.get("VAULT_PATH")
+    if env_vault:
+        return Path(env_vault)
+    return Path(config.vault.path)
+
+
 @app.command()
 def run(
     config_path: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to config.yaml (defaults to $CONFIG_PATH or ./config.yaml)."),
-    vault: Optional[Path] = typer.Option(None, "--vault", help="Override the vault path from config.yaml for this run."),
+    vault: Optional[Path] = vault_option,
     apply: bool = typer.Option(False, "--apply", help="Write changes live for this run, overriding config.yaml/DRY_RUN."),
     dry_run_flag: bool = typer.Option(False, "--dry-run", help="Force dry-run for this run, overriding config.yaml/DRY_RUN."),
     git_review: Optional[bool] = typer.Option(None, "--git-review/--no-git-review", help="Override config.yaml's git_review.enabled for this run."),
@@ -81,7 +115,10 @@ def run(
         dry_run = resolve_dry_run(config)
 
     use_git_review = config.git_review.enabled if git_review is None else git_review
-    vault_root = vault or Path(config.vault.path)
+    vault_root = _resolve_vault_root(vault, config)
+
+    mode_announcement = "[bold yellow]APPLY (live writes)[/bold yellow]" if not dry_run else "[cyan]dry-run[/cyan]"
+    console.print(f"Vault: [bold]{vault_root}[/bold] · Mode: {mode_announcement}")
 
     worktree_obj: Optional[NightlyWorktree] = None
     if use_git_review:
@@ -116,14 +153,18 @@ def run(
 
 
 @app.command()
-def status(config_path: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to config.yaml.")) -> None:
+def status(
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to config.yaml."),
+    vault: Optional[Path] = vault_option,
+) -> None:
     """Show the current configuration: vault, safety mode, model routing, git review."""
     config = _load_config_or_exit(config_path)
+    vault_root = _resolve_vault_root(vault, config)
 
     settings = Table(title="Second Brain configuration")
     settings.add_column("Setting")
     settings.add_column("Value")
-    settings.add_row("Vault path", config.vault.path)
+    settings.add_row("Vault path", f"{vault_root} (config.yaml: {config.vault.path})" if vault_root != Path(config.vault.path) else config.vault.path)
     settings.add_row("Daily notes folder", config.vault.daily_notes_folder or "(vault root)")
     settings.add_row("Default new-note folder", config.vault.default_new_note_folder or "(vault root)")
     settings.add_row("Safety mode", config.safety.mode)
@@ -144,16 +185,35 @@ def status(config_path: Optional[Path] = typer.Option(None, "--config", "-c", he
     console.print(routing)
 
 
+def _check_gemini_key() -> tuple[bool, str]:
+    """Verify GEMINI_API_KEY actually works, via a free list-models call - not just that it's set."""
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        return False, "MISSING (set GEMINI_API_KEY in .env)"
+    try:
+        models = GeminiProvider(api_key=api_key).list_models()
+        return True, f"({len(models)} models visible)"
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code in (400, 401, 403):
+            return False, f"INVALID KEY (HTTP {exc.response.status_code} from Gemini)"
+        return False, f"HTTP {exc.response.status_code} from Gemini"
+    except httpx.HTTPError as exc:
+        return False, f"UNREACHABLE ({exc})"
+
+
 @app.command()
-def check(config_path: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to config.yaml.")) -> None:
-    """Preflight checks: vault exists and is a git repo, Ollama reachable, Gemini key present if needed."""
+def check(
+    config_path: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to config.yaml."),
+    vault: Optional[Path] = vault_option,
+) -> None:
+    """Preflight checks: vault exists and is a git repo, Ollama reachable, Gemini key actually responds."""
     config = _load_config_or_exit(config_path)
     table = Table(title="Preflight checks")
     table.add_column("Check")
     table.add_column("Result")
     all_ok = True
 
-    vault_path = Path(config.vault.path)
+    vault_path = _resolve_vault_root(vault, config)
     vault_ok = vault_path.is_dir()
     all_ok &= vault_ok
     table.add_row("Vault directory exists", "[green]OK[/green]" if vault_ok else f"[red]MISSING[/red] ({vault_path})")
@@ -166,18 +226,21 @@ def check(config_path: Optional[Path] = typer.Option(None, "--config", "-c", hel
             all_ok = False
             table.add_row("Vault is a git repo", "[red]NOT A GIT REPO[/red]")
 
-    ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    try:
-        httpx.get(f"{ollama_host}/api/tags", timeout=3.0).raise_for_status()
-        table.add_row("Ollama reachable", f"[green]OK[/green] ({ollama_host})")
-    except httpx.HTTPError:
-        all_ok = False
-        table.add_row("Ollama reachable", f"[red]UNREACHABLE[/red] ({ollama_host})")
+    uses_ollama = config.embeddings.provider == "ollama" or any(task_cfg.provider == "ollama" for task_cfg in config.models.values())
+    if uses_ollama:
+        ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+        try:
+            httpx.get(f"{ollama_host}/api/tags", timeout=3.0).raise_for_status()
+            table.add_row("Ollama reachable", f"[green]OK[/green] ({ollama_host})")
+        except httpx.HTTPError:
+            all_ok = False
+            table.add_row("Ollama reachable", f"[red]UNREACHABLE[/red] ({ollama_host})")
 
-    if any(task_cfg.provider == "gemini" for task_cfg in config.models.values()):
-        has_key = bool(os.environ.get("GEMINI_API_KEY"))
-        all_ok &= has_key
-        table.add_row("GEMINI_API_KEY set", "[green]OK[/green]" if has_key else "[red]MISSING[/red]")
+    uses_gemini = config.embeddings.provider == "gemini" or any(task_cfg.provider == "gemini" for task_cfg in config.models.values())
+    if uses_gemini:
+        gemini_ok, gemini_detail = _check_gemini_key()
+        all_ok &= gemini_ok
+        table.add_row("Gemini API key responsive", f"[green]OK[/green] {gemini_detail}" if gemini_ok else f"[red]{gemini_detail}[/red]")
 
     console.print(table)
     if not all_ok:
@@ -187,18 +250,19 @@ def check(config_path: Optional[Path] = typer.Option(None, "--config", "-c", hel
 @app.command()
 def report(
     config_path: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to config.yaml."),
+    vault: Optional[Path] = vault_option,
     date: Optional[str] = typer.Option(None, "--date", help="Report date matching daily_note_date_format; defaults to today."),
 ) -> None:
     """Show a nightly report from the vault's _reports/ folder."""
     config = _load_config_or_exit(config_path)
-    vault = VaultIO(Path(config.vault.path))
+    vault_io = VaultIO(_resolve_vault_root(vault, config))
     date_str = date or datetime.now().strftime(strftime_pattern(config.vault.daily_note_date_format))
     rel_path = config.report.path.format(date=date_str)
 
-    if not vault.exists(rel_path):
+    if not vault_io.exists(rel_path):
         console.print(f"[yellow]No report found for {date_str}[/yellow] ({rel_path})")
         raise typer.Exit(code=1)
-    console.print(Markdown(vault.read_raw(rel_path)))
+    console.print(Markdown(vault_io.read_raw(rel_path)))
 
 
 if __name__ == "__main__":

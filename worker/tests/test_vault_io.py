@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.vault_io import Note, PathEscapesVaultError, VaultIO
+from src.vault_io import Note, PathBlockedByFileError, PathEscapesVaultError, VaultIO
 
 
 @pytest.fixture
@@ -149,3 +149,23 @@ def test_iter_notes_yields_parsed_metadata(vault: Path) -> None:
 
     assert found["note.md"].metadata["title"] == "T"
     assert found["note.md"].content == "body"
+
+
+def test_write_note_raises_clear_error_when_target_folder_is_actually_a_file(vault: Path) -> None:
+    """Regression test: writing "existing-file.md/new-note.md" must fail clearly, not with a
+    cryptic mkdir FileExistsError - this happened for real when a taxonomy bug suggested
+    treating a note's own filename as a destination folder."""
+    io = VaultIO(vault)
+    io.write_note("existing-file.md", Note(metadata={}, content="I am a file, not a folder"))
+
+    with pytest.raises(PathBlockedByFileError, match="existing-file.md"):
+        io.write_note("existing-file.md/new-note.md", Note(metadata={}, content="new"))
+
+
+def test_move_note_raises_clear_error_when_destination_folder_is_actually_a_file(vault: Path) -> None:
+    io = VaultIO(vault)
+    io.write_note("existing-file.md", Note(metadata={}, content="I am a file, not a folder"))
+    io.write_note("source.md", Note(metadata={}, content="to be moved"))
+
+    with pytest.raises(PathBlockedByFileError):
+        io.move_note("source.md", "existing-file.md/source.md", Note(metadata={}, content="to be moved"), dry_run=False)

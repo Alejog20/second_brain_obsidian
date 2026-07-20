@@ -57,6 +57,12 @@ class Reorganizer:
         if not is_clear:
             flags.append(f"low_clarity: {clarity_reason}" if clarity_reason else "low_clarity")
 
+        if not content.strip():
+            # Nothing meaningful to embed - an empty/whitespace-only note has no taxonomy or
+            # link signal, and some embedding providers return an empty vector for empty input,
+            # which would otherwise crash the vector-store search several layers down.
+            return ReorganizeResult(title=title, content=content, flags=tuple(flags))
+
         vector = self._embedder.embed(content)
         folder = self._suggest_taxonomy(rel_path, vector)
         links = self._suggest_links(rel_path, vector)
@@ -103,15 +109,27 @@ class Reorganizer:
         return corrected, False, reason or "unclear"
 
     def _suggest_taxonomy(self, rel_path: str, vector: list[float]) -> Optional[str]:
-        """Suggest a different top-level folder only when a close neighbor already lives there."""
-        current_folder = Path(rel_path).parts[0] if Path(rel_path).parts else ""
+        """Suggest a different top-level folder only when a close neighbor already lives in one.
+
+        A note's own filename is not a folder: for a root-level file, Path(path).parts has only
+        one element (the filename itself), which _top_level_folder deliberately treats as "no
+        folder" rather than degenerating into it - otherwise this could suggest moving a note
+        "into" another note's filename as if it were a directory.
+        """
+        current_folder = self._top_level_folder(rel_path)
         for match in self._vector_store.search(vector, limit=SEARCH_LIMIT):
             if match.path == rel_path:
                 continue
-            neighbor_folder = Path(match.path).parts[0] if Path(match.path).parts else ""
+            neighbor_folder = self._top_level_folder(match.path)
             if neighbor_folder and neighbor_folder != current_folder and match.distance <= TAXONOMY_CONFIDENCE_DISTANCE:
                 return neighbor_folder
         return None
+
+    @staticmethod
+    def _top_level_folder(rel_path: str) -> Optional[str]:
+        """The note's top-level folder, or None if it lives at the vault root (no real folder)."""
+        parts = Path(rel_path).parts
+        return parts[0] if len(parts) > 1 else None
 
     def _suggest_links(self, rel_path: str, vector: list[float]) -> list[str]:
         """Propose wikilinks to semantically related notes; never inserted into content automatically."""

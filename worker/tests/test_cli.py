@@ -88,9 +88,14 @@ class FakeWorktree:
 
 
 @pytest.fixture(autouse=True)
-def _reset_fakes() -> None:
+def _reset_fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeNightlyRun.calls.clear()
     FakeWorktree.instances.clear()
+    # cli.py loads .env at import time (see cli.py's top-of-file comment); an ambient .env in
+    # the real repo (VAULT_PATH, GEMINI_API_KEY, etc.) must not leak into these tests, which
+    # need a clean, predictable environment regardless of what's set on the machine running them.
+    for var in ("VAULT_PATH", "GEMINI_API_KEY", "CONFIG_PATH", "DRY_RUN", "OLLAMA_HOST"):
+        monkeypatch.delenv(var, raising=False)
 
 
 def test_help_lists_all_commands() -> None:
@@ -132,21 +137,63 @@ def test_check_reports_missing_vault_and_gemini_key(tmp_path: Path, monkeypatch:
     assert "MISSING" in result.output
 
 
+def _fake_get_by_url(gemini_status: int = 200, gemini_models: Optional[list[str]] = None):
+    """Routes fake httpx.get responses by URL, so Ollama and Gemini can be tested independently."""
+
+    def fake_get(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        request = httpx.Request("GET", url)
+        if "generativelanguage.googleapis.com" in url:
+            body = {"models": [{"name": m} for m in (gemini_models or [])]}
+            return httpx.Response(status_code=gemini_status, json=body, request=request)
+        return httpx.Response(status_code=200, json={"models": []}, request=request)
+
+    return fake_get
+
+
 def test_check_all_ok(config_path: Path, vault_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from git import Repo
 
     Repo.init(vault_dir)
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-
-    def fake_get(*args: Any, **kwargs: Any) -> httpx.Response:
-        return httpx.Response(status_code=200, json={"models": []}, request=httpx.Request("GET", "http://localhost:11434/api/tags"))
-
-    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(httpx, "get", _fake_get_by_url(gemini_models=["gemini-3.5-flash"]))
 
     result = runner.invoke(app, ["check", "--config", str(config_path)])
 
     assert result.exit_code == 0
     assert "OK" in result.output
+    assert "1 models visible" in result.output
+
+
+def test_check_gemini_key_invalid(config_path: Path, vault_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from git import Repo
+
+    Repo.init(vault_dir)
+    monkeypatch.setenv("GEMINI_API_KEY", "a-bad-key")
+    monkeypatch.setattr(httpx, "get", _fake_get_by_url(gemini_status=401))
+
+    result = runner.invoke(app, ["check", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "INVALID KEY" in result.output
+
+
+def test_check_gemini_unreachable(config_path: Path, vault_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from git import Repo
+
+    Repo.init(vault_dir)
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    def fake_get(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        if "generativelanguage.googleapis.com" in url:
+            raise httpx.ConnectError("connection refused", request=httpx.Request("GET", url))
+        return httpx.Response(status_code=200, json={"models": []}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+
+    result = runner.invoke(app, ["check", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert "UNREACHABLE" in result.output
 
 
 def test_run_rejects_apply_and_dry_run_together(config_path: Path) -> None:

@@ -125,6 +125,40 @@ def test_no_taxonomy_suggestion_when_neighbor_in_same_folder(vector_store: Vecto
     assert result.suggested_folder is None
 
 
+def test_no_taxonomy_suggestion_when_current_note_is_at_root(vector_store: VectorStore) -> None:
+    """A root-level note being reorganized has no real "current folder" - a close neighbor that
+    lives in a real folder should still be suggested (this is the normal, correct case)."""
+    vector_store.upsert(
+        EmbeddedChunk(id="02-Areas/security.md", text="x", vector=[1.0, 0.0, 0.0, 0.0], path="02-Areas/security.md", note_title="Security")
+    )
+    router = FakeRouter({"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE})
+    reorganizer = Reorganizer(router, FakeEmbedder([1.0, 0.0, 0.0, 0.0]), vector_store)
+
+    result = reorganizer.reorganize("note-at-root.md", Note(metadata={"title": "T"}, content="body"))
+
+    assert result.suggested_folder == "02-Areas"
+
+
+def test_no_taxonomy_suggestion_when_neighbor_is_also_at_root(vector_store: VectorStore) -> None:
+    """Regression test: a root-level neighbor's filename must never be suggested as a folder.
+
+    Path("neighbor-at-root.md").parts[0] degenerates to the filename itself for a single-part
+    path - treating that as a real folder would make move_note() try to create a note "inside"
+    another note's filename, which crashes (or worse, silently misfiles content) since that
+    path segment is actually a file, not a directory. This happened for real against an actual
+    vault where daily notes sit at the vault root alongside regular notes.
+    """
+    vector_store.upsert(
+        EmbeddedChunk(id="neighbor-at-root.md", text="x", vector=[1.0, 0.0, 0.0, 0.0], path="neighbor-at-root.md", note_title="Neighbor")
+    )
+    router = FakeRouter({"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE})
+    reorganizer = Reorganizer(router, FakeEmbedder([1.0, 0.0, 0.0, 0.0]), vector_store)
+
+    result = reorganizer.reorganize("00-Inbox/note.md", Note(metadata={"title": "T"}, content="body"))
+
+    assert result.suggested_folder is None
+
+
 def test_link_suggested_for_moderately_close_neighbor(vector_store: VectorStore) -> None:
     vector_store.upsert(
         EmbeddedChunk(id="04-Reference/related.md", text="x", vector=[0.9, 0.1, 0.0, 0.0], path="04-Reference/related.md", note_title="Related Note")
@@ -144,3 +178,25 @@ def test_reorganize_upserts_self_into_vector_store(vector_store: VectorStore) ->
     reorganizer.reorganize("00-Inbox/note.md", Note(metadata={"title": "T"}, content="body"))
 
     assert vector_store.count() == 1
+
+
+class ExplodingEmbedder:
+    """Raises if embed() is ever called - proves empty-content notes never reach the embedder."""
+
+    def embed(self, text: str) -> list[float]:
+        raise AssertionError("embed() should not be called for empty/whitespace-only content")
+
+
+def test_empty_content_after_grammar_pass_skips_embedding(vector_store: VectorStore) -> None:
+    """Regression test: a real Ollama embedding call for empty text can return an empty vector,
+    which crashes LanceDB several layers down (IndexError on vector[0]) - so empty/whitespace
+    content must never reach the embedder at all."""
+    router = FakeRouter({"bulk_grammar_pass": "---CORRECTED---\n   \n---CLARITY---\nclear"})
+    reorganizer = Reorganizer(router, ExplodingEmbedder(), vector_store)
+
+    result = reorganizer.reorganize("00-Inbox/blank.md", Note(metadata={"title": "T"}, content=""))
+
+    assert result.content.strip() == ""
+    assert result.suggested_folder is None
+    assert result.suggested_links == ()
+    assert vector_store.count() == 0

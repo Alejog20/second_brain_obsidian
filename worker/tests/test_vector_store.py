@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
-from src.vector_store import EmbeddedChunk, OllamaEmbeddingClient, VectorStore
+from src.vector_store import EmbeddedChunk, GeminiEmbeddingClient, OllamaEmbeddingClient, VectorStore
 
 
 def test_ollama_embedding_client_parses_response(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -20,6 +20,43 @@ def test_ollama_embedding_client_parses_response(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(httpx, "post", fake_post)
     client = OllamaEmbeddingClient()
     assert client.embed("some note text") == [0.1, 0.2, 0.3]
+
+
+def test_gemini_embedding_client_parses_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_post(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        assert "gemini-embedding-001:embedContent" in url
+        assert kwargs["json"]["outputDimensionality"] == 768
+        assert kwargs["headers"]["x-goog-api-key"] == "test-key"
+        return httpx.Response(
+            status_code=200,
+            json={"embedding": {"values": [0.1, 0.2, 0.3]}},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    client = GeminiEmbeddingClient(api_key="test-key")
+    assert client.embed("some note text") == [0.1, 0.2, 0.3]
+
+
+def test_gemini_embedding_client_missing_key_raises_clearly() -> None:
+    client = GeminiEmbeddingClient(api_key="")
+    with pytest.raises(ValueError, match="GEMINI_API_KEY"):
+        client.embed("hello")
+
+
+def test_gemini_embedding_client_requests_custom_output_dim(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_post(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        captured["dim"] = kwargs["json"]["outputDimensionality"]
+        return httpx.Response(status_code=200, json={"embedding": {"values": [0.1] * 256}}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    client = GeminiEmbeddingClient(api_key="test-key", output_dim=256)
+    result = client.embed("hi")
+
+    assert captured["dim"] == 256
+    assert len(result) == 256
 
 
 @pytest.fixture

@@ -12,6 +12,10 @@ class PathEscapesVaultError(Exception):
     """Raised when a resolved path would fall outside the vault root."""
 
 
+class PathBlockedByFileError(Exception):
+    """Raised when writing a note would require creating a folder where a file already exists."""
+
+
 @dataclass(frozen=True)
 class Note:
     """A parsed Markdown note: YAML frontmatter metadata plus body content."""
@@ -61,7 +65,7 @@ class VaultIO:
         between the delimiters, which is valid YAML but reads as a bug to a human in Obsidian.
         """
         full_path = self.resolve(rel_path)
-        full_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_parent_dir(full_path)
         if note.metadata:
             post = frontmatter.Post(note.content, **note.metadata)
             serialized = frontmatter.dumps(post)
@@ -116,7 +120,7 @@ class VaultIO:
         so aren't subject to the dry-run staging policy.
         """
         full_path = self.resolve(rel_path)
-        full_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_parent_dir(full_path)
         self._atomic_write(full_path, content)
 
     def iter_notes(self, excluded_folders: frozenset[str] = frozenset()) -> Iterator[tuple[str, Note]]:
@@ -129,6 +133,20 @@ class VaultIO:
                 yield rel_path, self.read_note(rel_path)
             except (OSError, UnicodeDecodeError):
                 continue
+
+    def _ensure_parent_dir(self, full_path: Path) -> None:
+        """Create the parent directory, raising a clear error if a file already occupies that path.
+
+        Walks each path segment from the vault root down (not just the immediate parent) so a
+        bug upstream that produces a path like "some-note.md/other-note.md" fails immediately
+        with a clear message, instead of a cryptic mkdir FileExistsError several layers down.
+        """
+        current = self._vault_root
+        for part in full_path.relative_to(self._vault_root).parts[:-1]:
+            current = current / part
+            if current.exists() and not current.is_dir():
+                raise PathBlockedByFileError(f"cannot create folder at {current}: a file already exists there")
+        full_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _atomic_write(self, full_path: Path, content: str) -> None:
         """Write content to a temp file in the same directory, then atomically replace the target."""
