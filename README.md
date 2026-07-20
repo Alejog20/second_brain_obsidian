@@ -122,11 +122,10 @@ of options on any command.
   skip (`_staging`, `_reports`, `.obsidian` by default).
 - **`safety`** — `mode: dry_run` or `mode: apply`, whether a git repo is required
   (it is, by default), and how much detail the report includes.
-- **`models`** — which model handles each task. Everything points at Gemini out of
-  the box. `llm_router.py` also has a working Ollama adapter if you'd rather run
-  models locally — set a task's `provider` to `ollama` and point `OLLAMA_HOST` at
-  a running Ollama instance. Just know that local inference is noticeably slower
-  and will spin your machine's fans up for the duration of a run.
+- **`models`** — which model handles each task. Everything points at Gemini, a
+  virtual/commercial LLM, out of the box - no local model to install or keep running.
+  `llm_router.py` also has a working Ollama adapter for local inference if you ever
+  want it, but it isn't the recommended or default path here.
 - **`git_review`** — the PR-based review workflow described above.
 
 Two safety switches have to agree before anything gets written for real: `config.yaml`'s

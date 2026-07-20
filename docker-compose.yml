@@ -4,10 +4,12 @@
 #   docker compose run --rm worker python -m src.jobs.nightly_run
 #
 # It intentionally has no long-running command, so `docker compose up` does
-# nothing by itself — that's expected. Ollama is NOT a service here: on
-# Apple Silicon, Docker Desktop cannot pass the GPU through to a Linux
-# container, so Ollama should run natively on macOS (`brew install ollama`)
-# and be reached at host.docker.internal, not containerized.
+# nothing by itself — that's expected. The worker calls out to a virtual/commercial
+# LLM API (Gemini) over the network, so there's no local model service to run inside
+# this container. OLLAMA_HOST below is kept for the optional local-inference adapter
+# in llm_router.py; if you ever use it, Ollama runs natively on macOS (`brew install
+# ollama`), reached at host.docker.internal, not containerized - Apple Silicon Docker
+# Desktop can't pass the GPU through to a Linux container.
 
 services:
   worker:
