@@ -98,6 +98,7 @@ def run(
     apply: bool = typer.Option(False, "--apply", help="Write changes live for this run, overriding config.yaml/DRY_RUN."),
     dry_run_flag: bool = typer.Option(False, "--dry-run", help="Force dry-run for this run, overriding config.yaml/DRY_RUN."),
     git_review: Optional[bool] = typer.Option(None, "--git-review/--no-git-review", help="Override config.yaml's git_review.enabled for this run."),
+    full: bool = typer.Option(False, "--full", help="Process every note in the vault, not just ones changed since the last run."),
     show_report: bool = typer.Option(True, "--show-report/--no-show-report", help="Print the generated report to the terminal when done."),
 ) -> None:
     """Run the nightly pipeline once: manifest diff -> reorganize -> digest -> AGENTS.md -> report."""
@@ -118,7 +119,8 @@ def run(
     vault_root = _resolve_vault_root(vault, config)
 
     mode_announcement = "[bold yellow]APPLY (live writes)[/bold yellow]" if not dry_run else "[cyan]dry-run[/cyan]"
-    console.print(f"Vault: [bold]{vault_root}[/bold] · Mode: {mode_announcement}")
+    scope_announcement = " · Scope: [bold]full vault[/bold]" if full else ""
+    console.print(f"Vault: [bold]{vault_root}[/bold] · Mode: {mode_announcement}{scope_announcement}")
 
     worktree_obj: Optional[NightlyWorktree] = None
     if use_git_review:
@@ -136,7 +138,7 @@ def run(
 
     try:
         with console.status("Running nightly pipeline..."):
-            report = NightlyRun(config, dry_run=dry_run, vault_root=vault_root).run()
+            report = NightlyRun(config, dry_run=dry_run, vault_root=vault_root, full_scan=full).run()
     except VaultNotAGitRepoError as exc:
         console.print(f"[bold red]Git error:[/bold red] {exc}")
         raise typer.Exit(code=1)
@@ -252,15 +254,21 @@ def report(
     config_path: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to config.yaml."),
     vault: Optional[Path] = vault_option,
     date: Optional[str] = typer.Option(None, "--date", help="Report date matching daily_note_date_format; defaults to today."),
+    report_type: str = typer.Option("review", "--type", help="Which report to show: 'review' (the audit log) or 'recap' (the morning reinforcement summary)."),
 ) -> None:
     """Show a nightly report from the vault's _reports/ folder."""
+    if report_type not in ("review", "recap"):
+        console.print("[bold red]Error:[/bold red] --type must be 'review' or 'recap'.")
+        raise typer.Exit(code=1)
+
     config = _load_config_or_exit(config_path)
     vault_io = VaultIO(_resolve_vault_root(vault, config))
     date_str = date or datetime.now().strftime(strftime_pattern(config.vault.daily_note_date_format))
-    rel_path = config.report.path.format(date=date_str)
+    path_template = config.report.recap_path if report_type == "recap" else config.report.path
+    rel_path = path_template.format(date=date_str)
 
     if not vault_io.exists(rel_path):
-        console.print(f"[yellow]No report found for {date_str}[/yellow] ({rel_path})")
+        console.print(f"[yellow]No {report_type} found for {date_str}[/yellow] ({rel_path})")
         raise typer.Exit(code=1)
     console.print(Markdown(vault_io.read_raw(rel_path)))
 

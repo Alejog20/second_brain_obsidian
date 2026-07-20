@@ -7,10 +7,9 @@ vault:
   daily_notes_folder: ""   # "" = vault root; daily notes (e.g. 07-18-2026.md) sit directly there
   daily_note_date_format: "YYYY-MM-DD"   # match Obsidian's Daily Notes / Periodic Notes plugin setting - verified against the real vault's actual daily note filenames (e.g. 2026-07-18.md)
   default_new_note_folder: ""   # "" = vault root; where digested notes land with no clear topic match
-  excluded_folders:
-    - "_staging"
-    - "_reports"
-    - ".obsidian"
+  # _staging, _reports, and .obsidian are always excluded in code (config.py), even if you
+  # remove them from this list or leave it empty - list any *additional* folders to skip here.
+  excluded_folders: []
 
 safety:
   mode: dry_run              # dry_run | apply — start here, flip to apply once you trust the output
@@ -57,6 +56,20 @@ models:
   chat_agent:
     provider: gemini
     model: gemini-3.5-flash      # consumed by Copilot for Obsidian, not this pipeline directly
+  daily_recap:
+    provider: gemini
+    model: gemini-3.5-flash      # morning reinforcement summary of yesterday's newly digested notes
+  fact_check:
+    provider: gemini
+    model: gemini-3.5-flash      # grounded (Google Search) fact-check + simple-explanation pass, see fact_check section below
+
+fact_check:
+  # Runs automatically every night, scoped to only the notes newly digested that run (see
+  # fact_checker.py) - small and cheap enough to be "on" by default. One batched, grounded
+  # (web-search-backed) call covers every new note from the run, not one call per note, to
+  # keep this well under Gemini's free-tier rate limit. Flip to false if you'd rather this
+  # pipeline never send note content to a live web search.
+  enabled: true
 
 cost_tracking:
   enabled: true
@@ -64,6 +77,7 @@ cost_tracking:
 
 report:
   path: "_reports/Review-{date}.md"
+  recap_path: "_reports/Recap-{date}.md"
   full_diff_log_path: "_reports/{date}-full-diff.json"
   include_cost_summary: true
 

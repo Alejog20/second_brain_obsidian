@@ -58,8 +58,8 @@ class FakeNightlyRun:
 
     calls: list[dict[str, Any]] = []
 
-    def __init__(self, config: Any, dry_run: bool, vault_root: Optional[Path] = None, **kwargs: Any) -> None:
-        FakeNightlyRun.calls.append({"config": config, "dry_run": dry_run, "vault_root": vault_root})
+    def __init__(self, config: Any, dry_run: bool, vault_root: Optional[Path] = None, full_scan: bool = False, **kwargs: Any) -> None:
+        FakeNightlyRun.calls.append({"config": config, "dry_run": dry_run, "vault_root": vault_root, "full_scan": full_scan})
         self.dry_run = dry_run
 
     def run(self) -> str:
@@ -212,6 +212,25 @@ def test_run_apply_flag_overrides_config(config_path: Path, monkeypatch: pytest.
     assert "APPLIED" in result.output
 
 
+def test_run_full_flag_passes_full_scan(config_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli_module, "NightlyRun", FakeNightlyRun)
+
+    result = runner.invoke(app, ["run", "--config", str(config_path), "--dry-run", "--full"])
+
+    assert result.exit_code == 0
+    assert FakeNightlyRun.calls[0]["full_scan"] is True
+    assert "Scope" in result.output
+
+
+def test_run_without_full_flag_defaults_to_incremental(config_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli_module, "NightlyRun", FakeNightlyRun)
+
+    result = runner.invoke(app, ["run", "--config", str(config_path), "--dry-run"])
+
+    assert result.exit_code == 0
+    assert FakeNightlyRun.calls[0]["full_scan"] is False
+
+
 def test_run_defaults_to_dry_run_from_config(config_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli_module, "NightlyRun", FakeNightlyRun)
     monkeypatch.delenv("DRY_RUN", raising=False)
@@ -279,4 +298,25 @@ def test_report_command_shows_existing_report(config_path: Path, vault_dir: Path
 def test_report_command_missing_report_exits_nonzero(config_path: Path, vault_dir: Path) -> None:
     result = runner.invoke(app, ["report", "--config", str(config_path), "--date", "01-01-2020"])
     assert result.exit_code == 1
-    assert "No report found" in result.output
+    assert "No review found" in result.output
+
+
+def test_report_command_rejects_bad_type(config_path: Path, vault_dir: Path) -> None:
+    result = runner.invoke(app, ["report", "--config", str(config_path), "--type", "nonsense"])
+    assert result.exit_code == 1
+    assert "--type" in result.output
+    assert "review" in result.output
+    assert "recap" in result.output
+
+
+def test_report_command_recap_type(config_path: Path, vault_dir: Path) -> None:
+    from datetime import datetime
+
+    (vault_dir / "_reports").mkdir()
+    today = datetime.now().strftime("%m-%d-%Y")
+    (vault_dir / "_reports" / f"Recap-{today}.md").write_text("# Recap — today\n\nYou learned some things.", encoding="utf-8")
+
+    result = runner.invoke(app, ["report", "--config", str(config_path), "--type", "recap"])
+
+    assert result.exit_code == 0
+    assert "You learned some things" in result.output

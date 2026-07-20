@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from src.config import load_config
-from src.llm_router import GeminiProvider, LLMRouter, UnsupportedProviderError
+from src.llm_router import GeminiProvider, LLMRouter, OllamaProvider, UnsupportedProviderError
 
 CONFIG_YAML = """
 vault:
@@ -77,6 +77,21 @@ def test_unimplemented_provider_raises(config) -> None:
         router.generate("taxonomy_analysis", system="", prompt="")
 
 
+def test_router_forwards_grounded_flag_to_provider(monkeypatch: pytest.MonkeyPatch, config) -> None:
+    captured = {}
+
+    def fake_post(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        captured["json"] = kwargs.get("json", {})
+        return _fake_gemini_response()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    router = LLMRouter(config, gemini_api_key="test-key")
+
+    router.generate("daily_digestion", system="", prompt="hi", grounded=True)
+
+    assert captured["json"]["tools"] == [{"google_search": {}}]
+
+
 def test_unknown_task_key_raises(config) -> None:
     router = LLMRouter(config)
     with pytest.raises(ValueError):
@@ -143,3 +158,39 @@ def test_gemini_empty_candidates_returns_empty_text(monkeypatch: pytest.MonkeyPa
     result = provider.generate(system="", prompt="hi", model="gemini-3.5-flash")
 
     assert result.text == ""
+
+
+def test_gemini_grounded_request_includes_search_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_post(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        captured["json"] = kwargs.get("json", {})
+        return _fake_gemini_response()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = GeminiProvider(api_key="test-key")
+
+    provider.generate(system="", prompt="hi", model="gemini-3.5-flash", grounded=True)
+
+    assert captured["json"]["tools"] == [{"google_search": {}}]
+
+
+def test_gemini_ungrounded_request_has_no_tools_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    def fake_post(url: str, *args: Any, **kwargs: Any) -> httpx.Response:
+        captured["json"] = kwargs.get("json", {})
+        return _fake_gemini_response()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    provider = GeminiProvider(api_key="test-key")
+
+    provider.generate(system="", prompt="hi", model="gemini-3.5-flash")
+
+    assert "tools" not in captured["json"]
+
+
+def test_ollama_grounded_request_raises() -> None:
+    provider = OllamaProvider()
+    with pytest.raises(ValueError, match="grounding"):
+        provider.generate(system="", prompt="hi", model="qwen", grounded=True)
