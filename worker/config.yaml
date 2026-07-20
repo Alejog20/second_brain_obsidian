@@ -29,15 +29,15 @@ embeddings:
   store_path: /data/vector_store
 
 models:
-  # Everything routes to Gemini's free tier - deliberate choice over local Ollama (see
-  # SECOND_BRAIN_ARCHITECTURE.md, §7 for the original reasoning behind splitting bulk
-  # tasks onto a local model): running qwen3.5:9b locally kept a MacBook Air's fans at
-  # full tilt for the duration of every run, which mattered more than the free-tier
-  # rate-limit risk this creates for high-volume tasks (bulk_grammar_pass/title_and_tagging
-  # fire once per changed note, every run). If a real run starts hitting 429s, those
-  # notes come back as flagged "reorganize failed" items in the report rather than
-  # crashing the run (see nightly_run.py's httpx.HTTPError handling) - not silent, but
-  # worth watching if you're processing many notes at once.
+  # Everything routes to Gemini - a virtual/commercial LLM, by design: no local model
+  # to install, keep running, or heat the machine up over. Running a local model
+  # (qwen3.5:9b via Ollama) was tried and kept a MacBook Air's fans at full tilt for
+  # the duration of every run, which mattered more than the free-tier rate-limit risk
+  # this creates for high-volume tasks (bulk_grammar_pass/title_and_tagging fire once
+  # per changed note, every run). If a real run starts hitting 429s, those notes come
+  # back as flagged "reorganize failed" items in the report rather than crashing the
+  # run (see nightly_run.py's httpx.HTTPError handling) - not silent, but worth
+  # watching if you're processing many notes at once.
   # llm_router.py implements both "ollama" and "gemini"; other providers (anthropic,
   # deepseek) are config-only stubs, not implemented yet.
   # provider: ollama | gemini | anthropic | deepseek
