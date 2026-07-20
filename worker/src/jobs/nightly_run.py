@@ -11,10 +11,12 @@ import httpx
 
 from ..agents_md_builder import AgentsBuilder
 from ..config import Config, load_config
-from ..digestor import Digestor
+from ..digestor import Digestor, DigestedChunk
+from ..fact_checker import FactChecker, FactCheckEntry
 from ..git_safety import GitSafety
 from ..llm_router import LLMRouter, Router
 from ..manifest import ManifestManager
+from ..recap import RecapEntry, RecapGenerator
 from ..reorganizer import Reorganizer
 from ..report import generate_morning_report
 from ..vault_io import Note, PathBlockedByFileError, VaultIO
@@ -80,9 +82,11 @@ class NightlyRun:
         embedder: Optional[Embedder] = None,
         vector_store: Optional[VectorStore] = None,
         manifest: Optional[ManifestManager] = None,
+        full_scan: bool = False,
     ) -> None:
         self._config = config
         self._dry_run = dry_run
+        self._full_scan = full_scan
         self._vault_root = vault_root or Path(config.vault.path)
         self._vault = vault or VaultIO(self._vault_root)
         self._git = git or GitSafety(self._vault_root, require_git=config.safety.require_git)
@@ -102,6 +106,8 @@ class NightlyRun:
             default_folder=config.vault.default_new_note_folder,
         )
         self._agents_builder = AgentsBuilder(self._vault, excluded_folders=frozenset(config.vault.excluded_folders))
+        self._recap_generator = RecapGenerator(self._router)
+        self._fact_checker = FactChecker(self._router, self._vault, dry_run=dry_run)
         self._materiality_any = config.safety.materiality_threshold == "any"
         self._taxonomy_changed = False
 
@@ -118,14 +124,12 @@ class NightlyRun:
 
         run_label = start.strftime("nightly run %Y-%m-%d %H:%M")
         with self._git.bracket(run_label):
-            delta = self._manifest.get_delta()
-            note_paths = [
-                p
-                for p in (delta.added + delta.modified)
-                if not self._is_daily_note(Path(p)) and str(p) != "AGENTS.md"
-            ]
+            note_paths = self._scan_note_paths()
             scanned_count = len(note_paths)
-            logger.info("%d note(s) changed since the last run", scanned_count)
+            if self._full_scan:
+                logger.info("Full scan: %d note(s) in the vault", scanned_count)
+            else:
+                logger.info("%d note(s) changed since the last run", scanned_count)
 
             for rel_path in note_paths:
                 logger.debug("Reorganizing %s", rel_path)
@@ -140,13 +144,23 @@ class NightlyRun:
                     minor_changes += 1
 
             logger.info("Digesting today's daily note, if present")
-            digested_new, digested_merges = self._digest_today()
+            digested_new, digested_merges, chunks = self._digest_today()
             new_notes.extend(digested_new)
             significant_items.extend(digested_merges)
             if digested_new:
                 logger.info("Created %d new note(s) from today's daily note", len(digested_new))
             if digested_merges:
                 logger.info("Merged %d chunk(s) into existing notes", len(digested_merges))
+
+            date_str = start.strftime(strftime_pattern(self._config.vault.daily_note_date_format))
+            recap_entries = [RecapEntry(title=c.title, content=c.content) for c in chunks]
+            self._maybe_write_recap(recap_entries, date_str)
+
+            if self._config.fact_check.enabled:
+                fact_check_entries = [
+                    FactCheckEntry(title=c.title, content=c.content, rel_path=c.rel_path) for c in chunks
+                ]
+                significant_items.extend(self._run_fact_check(fact_check_entries, date_str))
 
             self._maybe_rebuild_agents_md()
             self._manifest.commit()
@@ -188,6 +202,19 @@ class NightlyRun:
 
         date_regex = _DATE_FORMAT_REGEXES.get(self._config.vault.daily_note_date_format)
         return bool(date_regex and date_regex.match(rel_path.stem))
+
+    def _scan_note_paths(self) -> list[Path]:
+        """List the notes to process this run: every note in a full scan, else just what changed.
+
+        Either way the daily-notes-folder/AGENTS.md exclusion is the same - a full scan isn't an
+        excuse to reorganize daily notes, it's just "check everything else, not only what's new."
+        """
+        if self._full_scan:
+            candidates = (Path(rel_path) for rel_path, _ in self._vault.iter_notes(frozenset(self._config.vault.excluded_folders)))
+        else:
+            delta = self._manifest.get_delta()
+            candidates = iter(delta.added + delta.modified)
+        return [p for p in candidates if not self._is_daily_note(p) and str(p) != "AGENTS.md"]
 
     def _router_cost(self) -> float:
         """Read cumulative cost from the router if it tracks one; fakes injected in tests may not."""
@@ -234,17 +261,22 @@ class NightlyRun:
         except PathBlockedByFileError as exc:
             return None, {"title": rel_path, "reason": f"could not apply changes: {exc}"}, False
 
-    def _digest_today(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Digest today's daily note if it exists; returns (new_note_items, merge_items)."""
+    def _digest_today(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[DigestedChunk]]:
+        """Digest today's daily note if it exists; returns (new_note_items, merge_items, chunks).
+
+        chunks is the digestor's raw output - the single source of truth run() derives both
+        the recap and the fact-check scope from, so "what counts as today's new material"
+        can't drift between the two.
+        """
         date_str = datetime.now().strftime(strftime_pattern(self._config.vault.daily_note_date_format))
         daily_rel_path = _join_folder(self._config.vault.daily_notes_folder, f"{date_str}.md")
         if not self._vault.exists(daily_rel_path):
-            return [], []
+            return [], [], []
 
         try:
             chunks = self._digestor.digest(daily_rel_path, date_str)
         except httpx.HTTPError as exc:
-            return [], [{"reason": "Daily digestion failed", "detail": str(exc)}]
+            return [], [{"reason": "Daily digestion failed", "detail": str(exc)}], []
 
         new_notes = [{"title": c.title, "source": date_str} for c in chunks if not c.merged_into_existing]
         merge_items = [
@@ -255,7 +287,7 @@ class NightlyRun:
             for c in chunks
             if c.merged_into_existing
         ]
-        return new_notes, merge_items
+        return new_notes, merge_items, chunks
 
     def _maybe_rebuild_agents_md(self) -> None:
         """Rebuild AGENTS.md only when the taxonomy changed this run, or it doesn't exist yet."""
@@ -276,6 +308,35 @@ class NightlyRun:
         date_str = end.strftime(strftime_pattern(self._config.vault.daily_note_date_format))
         report_rel_path = self._config.report.path.format(date=date_str)
         self._vault.write_raw(report_rel_path, report)
+
+    def _maybe_write_recap(self, entries: list[RecapEntry], date_str: str) -> None:
+        """Write a reinforcement recap of today's digested notes, if there were any."""
+        try:
+            recap = self._recap_generator.build(entries, date_str)
+        except httpx.HTTPError as exc:
+            logger.warning("Recap generation failed: %s", exc)
+            return
+        if recap is None:
+            return
+        logger.info("Writing morning recap")
+        recap_rel_path = self._config.report.recap_path.format(date=date_str)
+        self._vault.write_raw(recap_rel_path, recap)
+
+    def _run_fact_check(self, entries: list[FactCheckEntry], date_str: str) -> list[dict[str, Any]]:
+        """Run the grounded fact-check pass over today's digested notes, if there were any.
+
+        Failure here (rate limit, network) degrades the same way recap generation does -
+        logged and skipped, never crashing the run - since this is a nice-to-have addition
+        on top of notes the digestor already successfully wrote.
+        """
+        try:
+            items = self._fact_checker.run(entries, date_str)
+        except httpx.HTTPError as exc:
+            logger.warning("Fact-check pass failed: %s", exc)
+            return []
+        if items:
+            logger.info("Fact-check flagged %d note(s)", len(items))
+        return items
 
 
 def main() -> None:

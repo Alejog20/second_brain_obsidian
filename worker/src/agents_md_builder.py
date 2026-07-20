@@ -91,6 +91,23 @@ vault analysis job on {generated_date} from {taxonomy.note_count} scanned notes.
 ## Frontmatter fields observed
 {key_lines}
 
+## AI-added content
+Some notes carry an `> [!ai-fact-check]` callout near the end - Second Brain appends these
+automatically each night after fact-checking that day's new notes against live web search.
+They are never merged into the user's own prose, so they're always visually separable from
+what the user actually wrote:
+- Treat the callout's content as a note, not a correction already applied to the text above
+  it - the user hasn't necessarily reviewed or acted on it yet.
+- Never delete or edit a `> [!ai-fact-check]` callout; only the nightly pipeline writes these.
+- If a callout and the note body disagree, say so plainly rather than picking one silently.
+
+## Token-saving tips for AI tools
+- This file is the map - read it before opening notes, not instead of grep/search on demand.
+- Prefer a targeted read of the specific note(s) a question is about over scanning a whole
+  folder; the folder/tag vocabulary above is usually enough to know where to look first.
+- Don't re-summarize a note's full content back to the user if a short answer + a `[[link]]`
+  to the source note will do.
+
 ## How to answer questions
 - Answer only from what's in this vault. If it isn't covered, say so directly.
 - Cite the specific note(s) as `[[wikilinks]]`, not "according to my search."

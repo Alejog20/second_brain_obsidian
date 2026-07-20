@@ -9,6 +9,14 @@ import yaml
 
 DEFAULT_CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", "config.yaml"))
 
+# Always excluded from every scan, regardless of what config.yaml's vault.excluded_folders
+# says (even if that key is missing or empty). These are the pipeline's own working folders -
+# a config mistake here isn't hypothetical: an incomplete excluded_folders list once let the
+# reorganizer treat a stale _staging/ proposal as a real note and move a live note into
+# _reports/ as if it were a normal destination folder. That's not a risk worth re-deriving
+# correctly in every config.yaml a user writes.
+_ALWAYS_EXCLUDED_FOLDERS = frozenset({"_staging", "_reports", ".obsidian"})
+
 
 @dataclass(frozen=True)
 class VaultConfig:
@@ -16,13 +24,15 @@ class VaultConfig:
 
     daily_notes_folder and default_new_note_folder are both "" by default, meaning
     the vault root - not every vault uses a dated subfolder or an inbox folder.
+    excluded_folders always includes _ALWAYS_EXCLUDED_FOLDERS on top of whatever
+    config.yaml adds - see load_config().
     """
 
     path: str
     daily_notes_folder: str = ""
     daily_note_date_format: str = "MM-DD-YYYY"
     default_new_note_folder: str = ""
-    excluded_folders: tuple[str, ...] = field(default_factory=tuple)
+    excluded_folders: tuple[str, ...] = field(default_factory=lambda: tuple(sorted(_ALWAYS_EXCLUDED_FOLDERS)))
 
 
 @dataclass(frozen=True)
@@ -67,11 +77,25 @@ class CostTrackingConfig:
 
 @dataclass(frozen=True)
 class ReportConfig:
-    """Output paths for the nightly morning report and its full diff log."""
+    """Output paths for the nightly morning report, the reinforcement recap, and the full diff log."""
 
     path: str = "_reports/Review-{date}.md"
+    recap_path: str = "_reports/Recap-{date}.md"
     full_diff_log_path: str = "_reports/{date}-full-diff.json"
     include_cost_summary: bool = True
+
+
+@dataclass(frozen=True)
+class FactCheckConfig:
+    """Whether the daily fact-check + simplified-explanation pass runs automatically.
+
+    Scoped to yesterday's newly digested notes only (see fact_checker.py) - small and
+    cheap enough to run every night by default, but the user should still be able to
+    turn it off without touching code (it's the only pipeline step that sends note
+    content to a live web search, which is a stronger privacy tradeoff than a plain
+    generateContent call)."""
+
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -96,6 +120,7 @@ class Config:
     models: dict[str, ModelTaskConfig]
     cost_tracking: CostTrackingConfig
     report: ReportConfig
+    fact_check: FactCheckConfig
     git_review: GitReviewConfig
 
     def model_for(self, task_key: str) -> ModelTaskConfig:
@@ -116,12 +141,13 @@ def load_config(config_path: Optional[Path] = None) -> Config:
 
     vault_raw = raw.get("vault", {})
     try:
+        configured_exclusions = set(vault_raw.get("excluded_folders", []))
         vault = VaultConfig(
             path=vault_raw["path"],
             daily_notes_folder=vault_raw.get("daily_notes_folder", ""),
             daily_note_date_format=vault_raw.get("daily_note_date_format", "MM-DD-YYYY"),
             default_new_note_folder=vault_raw.get("default_new_note_folder", ""),
-            excluded_folders=tuple(vault_raw.get("excluded_folders", [])),
+            excluded_folders=tuple(sorted(configured_exclusions | _ALWAYS_EXCLUDED_FOLDERS)),
         )
     except KeyError:
         raise ValueError(f"{path} is missing required field: vault.path") from None
@@ -159,9 +185,13 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     report_raw = raw.get("report", {})
     report = ReportConfig(
         path=report_raw.get("path", "_reports/Review-{date}.md"),
+        recap_path=report_raw.get("recap_path", "_reports/Recap-{date}.md"),
         full_diff_log_path=report_raw.get("full_diff_log_path", "_reports/{date}-full-diff.json"),
         include_cost_summary=report_raw.get("include_cost_summary", True),
     )
+
+    fact_check_raw = raw.get("fact_check", {})
+    fact_check = FactCheckConfig(enabled=fact_check_raw.get("enabled", True))
 
     git_review_raw = raw.get("git_review", {})
     git_review = GitReviewConfig(
@@ -179,5 +209,6 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         models=models,
         cost_tracking=cost_tracking,
         report=report,
+        fact_check=fact_check,
         git_review=git_review,
     )

@@ -52,12 +52,13 @@ def test_load_config_parses_all_sections(tmp_path: Path) -> None:
     config = load_config(_write_config(tmp_path, VALID_YAML))
 
     assert config.vault.path == "/vault"
-    assert config.vault.excluded_folders == ("_staging", "_reports")
+    assert set(config.vault.excluded_folders) == {"_staging", "_reports", ".obsidian"}
     assert config.safety.mode == "dry_run"
     assert config.safety.is_apply is False
     assert config.embeddings.model == "nomic-embed-text"
     assert config.cost_tracking.enabled is True
     assert config.report.path == "_reports/Review-{date}.md"
+    assert config.fact_check.enabled is True
 
 
 def test_model_for_returns_task_config(tmp_path: Path) -> None:
@@ -88,3 +89,38 @@ def test_apply_mode_flag(tmp_path: Path) -> None:
     apply_yaml = VALID_YAML.replace("mode: dry_run", "mode: apply")
     config = load_config(_write_config(tmp_path, apply_yaml))
     assert config.safety.is_apply is True
+
+
+def test_staging_and_reports_excluded_even_when_field_is_empty(tmp_path: Path) -> None:
+    """Regression test: _staging/_reports/.obsidian must be protected even if a config.yaml
+    explicitly sets excluded_folders to an empty list - this happened for real (a scratch
+    config with no excluded_folders let the reorganizer move a live note into _reports/)."""
+    yaml_content = VALID_YAML.replace('excluded_folders:\n    - "_staging"\n    - "_reports"', "excluded_folders: []")
+    config = load_config(_write_config(tmp_path, yaml_content))
+    assert set(config.vault.excluded_folders) >= {"_staging", "_reports", ".obsidian"}
+
+
+def test_staging_and_reports_excluded_when_field_is_missing_entirely(tmp_path: Path) -> None:
+    yaml_content = "vault:\n  path: /vault\n"
+    config = load_config(_write_config(tmp_path, yaml_content))
+    assert set(config.vault.excluded_folders) == {"_staging", "_reports", ".obsidian"}
+
+
+def test_user_excluded_folders_are_added_not_replaced(tmp_path: Path) -> None:
+    yaml_content = VALID_YAML.replace(
+        'excluded_folders:\n    - "_staging"\n    - "_reports"',
+        'excluded_folders:\n    - "attachments"',
+    )
+    config = load_config(_write_config(tmp_path, yaml_content))
+    assert set(config.vault.excluded_folders) == {"_staging", "_reports", ".obsidian", "attachments"}
+
+
+def test_fact_check_defaults_to_enabled_when_section_is_missing(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path, VALID_YAML))
+    assert config.fact_check.enabled is True
+
+
+def test_fact_check_can_be_disabled(tmp_path: Path) -> None:
+    yaml_content = VALID_YAML + "\nfact_check:\n  enabled: false\n"
+    config = load_config(_write_config(tmp_path, yaml_content))
+    assert config.fact_check.enabled is False

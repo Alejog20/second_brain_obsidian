@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from git import Repo
 
-from src.config import Config, CostTrackingConfig, EmbeddingsConfig, GitReviewConfig, ModelTaskConfig, ReportConfig, SafetyConfig, VaultConfig
+from src.config import Config, CostTrackingConfig, EmbeddingsConfig, FactCheckConfig, GitReviewConfig, ModelTaskConfig, ReportConfig, SafetyConfig, VaultConfig
 from src.git_safety import GitSafety
 from src.jobs.nightly_run import NightlyRun, _build_default_embedder, resolve_dry_run
 from src.llm_router import LLMResponse
@@ -25,7 +25,7 @@ class FakeRouter:
         self._responses = responses
         self.total_cost_usd = 0.0
 
-    def generate(self, task_key: str, system: str, prompt: str) -> LLMResponse:
+    def generate(self, task_key: str, system: str, prompt: str, grounded: bool = False) -> LLMResponse:
         return LLMResponse(text=self._responses.get(task_key, ""), tokens_in=1, tokens_out=1, cost_usd=0.0)
 
 
@@ -60,9 +60,11 @@ def make_config(
             "title_and_tagging": ModelTaskConfig(provider="ollama", model="qwen"),
             "bulk_grammar_pass": ModelTaskConfig(provider="ollama", model="qwen"),
             "daily_digestion": ModelTaskConfig(provider="ollama", model="qwen"),
+            "fact_check": ModelTaskConfig(provider="ollama", model="qwen"),
         },
         cost_tracking=CostTrackingConfig(enabled=True, currency="USD"),
         report=ReportConfig(path="_reports/Review-{date}.md", full_diff_log_path="_reports/{date}-full-diff.json", include_cost_summary=True),
+        fact_check=FactCheckConfig(enabled=True),
         git_review=GitReviewConfig(),
     )
 
@@ -100,6 +102,7 @@ def _make_run(
     materiality: str = "structural",
     daily_notes_folder: str = "01-Daily",
     default_new_note_folder: str = "00-Inbox",
+    full_scan: bool = False,
 ) -> NightlyRun:
     config = make_config(
         vault_root,
@@ -123,6 +126,7 @@ def _make_run(
         embedder=embedder,
         vector_store=vector_store,
         manifest=manifest,
+        full_scan=full_scan,
     )
 
 
@@ -378,3 +382,157 @@ def test_default_constructed_vector_store_uses_data_path_env_var_not_config(
     run.run()
 
     assert (data_path / "vector_store").is_dir()
+
+
+def test_full_scan_processes_unchanged_notes(tmp_path: Path, vault_root: Path) -> None:
+    """A note the manifest already knows about (unchanged since baseline) is still
+    reprocessed under --full, unlike a normal incremental run."""
+    vault = VaultIO(vault_root)
+    vault.write_note("00-Inbox/idea.md", Note(metadata={"title": "Untitled"}, content="teh idea"))
+
+    baseline_run = _make_run(tmp_path, vault_root, "apply", {"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE, "title_and_tagging": "A Real Title"}, [1.0, 0.0, 0.0, 0.0])
+    baseline_run.run()  # establishes the manifest baseline; nothing left "changed" afterward
+
+    full_run = _make_run(tmp_path, vault_root, "apply", {"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE, "title_and_tagging": "A Real Title"}, [1.0, 0.0, 0.0, 0.0], full_scan=True)
+    report = full_run.run()
+
+    assert "1 notes scanned" in report
+
+
+def test_incremental_scan_skips_unchanged_notes_for_comparison(tmp_path: Path, vault_root: Path) -> None:
+    vault = VaultIO(vault_root)
+    vault.write_note("00-Inbox/idea.md", Note(metadata={"title": "Untitled"}, content="teh idea"))
+
+    baseline_run = _make_run(tmp_path, vault_root, "apply", {"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE, "title_and_tagging": "A Real Title"}, [1.0, 0.0, 0.0, 0.0])
+    baseline_run.run()
+
+    incremental_run = _make_run(tmp_path, vault_root, "apply", {"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE, "title_and_tagging": "A Real Title"}, [1.0, 0.0, 0.0, 0.0])
+    report = incremental_run.run()
+
+    assert "0 notes scanned" in report
+
+
+def test_full_scan_still_excludes_daily_notes(tmp_path: Path, vault_root: Path) -> None:
+    vault = VaultIO(vault_root)
+    today = datetime.now().strftime("%m-%d-%Y")
+    vault.write_note(f"01-Daily/{today}.md", Note(metadata={"title": "Untitled"}, content="# Idea\nRaw journal text."))
+
+    run = _make_run(tmp_path, vault_root, "apply", {"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE, "title_and_tagging": "Should Not Be Used", "daily_digestion": "Idea"}, [1.0, 0.0, 0.0, 0.0], full_scan=True)
+    run.run()
+
+    daily = vault.read_note(f"01-Daily/{today}.md")
+    assert daily.metadata.get("title") == "Untitled"
+
+
+def test_recap_written_after_digesting_daily_note(tmp_path: Path, vault_root: Path) -> None:
+    vault = VaultIO(vault_root)
+    today = datetime.now().strftime("%m-%d-%Y")
+    vault.write_note(f"01-Daily/{today}.md", Note(metadata={}, content="# New Idea\nSomething worth keeping."))
+
+    run = _make_run(tmp_path, vault_root, "apply", {"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE, "daily_digestion": "New Idea Note", "daily_recap": "Yesterday you explored a new idea.\n\n1. What was the idea about?"}, [1.0, 0.0, 0.0, 0.0])
+    run.run()
+
+    assert vault.exists(f"_reports/Recap-{today}.md")
+    recap = vault.read_raw(f"_reports/Recap-{today}.md")
+    assert "Yesterday you explored a new idea" in recap
+
+
+def test_no_recap_written_without_a_daily_note(tmp_path: Path, vault_root: Path) -> None:
+    vault = VaultIO(vault_root)
+    vault.write_note("00-Inbox/idea.md", Note(metadata={"title": "Untitled"}, content="teh idea"))
+    today = datetime.now().strftime("%m-%d-%Y")
+
+    run = _make_run(tmp_path, vault_root, "apply", {"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE, "title_and_tagging": "A Real Title"}, [1.0, 0.0, 0.0, 0.0])
+    run.run()
+
+    assert not vault.exists(f"_reports/Recap-{today}.md")
+
+
+def test_fact_check_appends_callout_to_newly_digested_note(tmp_path: Path, vault_root: Path) -> None:
+    vault = VaultIO(vault_root)
+    today = datetime.now().strftime("%m-%d-%Y")
+    vault.write_note(f"01-Daily/{today}.md", Note(metadata={}, content="# New Idea\nSomething worth keeping."))
+
+    run = _make_run(
+        tmp_path,
+        vault_root,
+        "apply",
+        {
+            "bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE,
+            "daily_digestion": "New Idea Note",
+            "fact_check": "---NOTE: New Idea Note---\nWorth double-checking one detail here; see a primary source.",
+        },
+        [1.0, 0.0, 0.0, 0.0],
+    )
+    report = run.run()
+
+    new_note = vault.read_note("00-Inbox/New-Idea-Note.md")
+    assert "[!ai-fact-check]" in new_note.content
+    assert "Fact-check flagged New Idea Note" in report
+
+
+def test_fact_check_skipped_when_disabled_in_config(tmp_path: Path, vault_root: Path) -> None:
+    vault = VaultIO(vault_root)
+    today = datetime.now().strftime("%m-%d-%Y")
+    vault.write_note(f"01-Daily/{today}.md", Note(metadata={}, content="# New Idea\nSomething worth keeping."))
+
+    config = replace(
+        make_config(vault_root, mode="apply"),
+        fact_check=FactCheckConfig(enabled=False),
+    )
+    git = GitSafety(vault_root, require_git=True)
+    router = FakeRouter(
+        {
+            "bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE,
+            "daily_digestion": "New Idea Note",
+            "fact_check": "---NOTE: New Idea Note---\nShould never be requested.",
+        }
+    )
+    manifest = ManifestManager(vault_path=str(vault_root), excluded_folders=["_staging", "_reports"], db_path=tmp_path / "manifest.sqlite")
+    run = NightlyRun(
+        config,
+        dry_run=False,
+        vault=vault,
+        git=git,
+        router=router,
+        embedder=FakeEmbedder([1.0, 0.0, 0.0, 0.0]),
+        vector_store=VectorStore(tmp_path / "vector_store", embedding_dim=4),
+        manifest=manifest,
+    )
+    report = run.run()
+
+    new_note = vault.read_note("00-Inbox/New-Idea-Note.md")
+    assert "[!ai-fact-check]" not in new_note.content
+    assert "Fact-check flagged" not in report
+
+
+def test_fact_check_failure_is_flagged_not_fatal(tmp_path: Path, vault_root: Path) -> None:
+    import httpx
+
+    class RaisingRouter(FakeRouter):
+        def generate(self, task_key: str, system: str, prompt: str, grounded: bool = False) -> LLMResponse:
+            if task_key == "fact_check":
+                raise httpx.HTTPError("rate limited")
+            return super().generate(task_key, system, prompt, grounded=grounded)
+
+    vault = VaultIO(vault_root)
+    today = datetime.now().strftime("%m-%d-%Y")
+    vault.write_note(f"01-Daily/{today}.md", Note(metadata={}, content="# New Idea\nSomething worth keeping."))
+
+    config = make_config(vault_root, mode="apply")
+    git = GitSafety(vault_root, require_git=True)
+    router = RaisingRouter({"bulk_grammar_pass": CLEAR_GRAMMAR_RESPONSE, "daily_digestion": "New Idea Note"})
+    manifest = ManifestManager(vault_path=str(vault_root), excluded_folders=["_staging", "_reports"], db_path=tmp_path / "manifest.sqlite")
+    run = NightlyRun(
+        config,
+        dry_run=False,
+        vault=vault,
+        git=git,
+        router=router,
+        embedder=FakeEmbedder([1.0, 0.0, 0.0, 0.0]),
+        vector_store=VectorStore(tmp_path / "vector_store", embedding_dim=4),
+        manifest=manifest,
+    )
+    report = run.run()  # must not raise
+
+    assert vault.exists("00-Inbox/New-Idea-Note.md")

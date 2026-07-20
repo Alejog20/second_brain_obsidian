@@ -30,7 +30,7 @@ class UnsupportedProviderError(Exception):
 class LLMProvider(Protocol):
     """A backend capable of generating text for a given model name."""
 
-    def generate(self, system: str, prompt: str, model: str) -> LLMResponse:
+    def generate(self, system: str, prompt: str, model: str, grounded: bool = False) -> LLMResponse:
         """Generate a completion for the given system prompt, user prompt, and model name."""
         ...
 
@@ -38,7 +38,7 @@ class LLMProvider(Protocol):
 class Router(Protocol):
     """Structural interface satisfied by LLMRouter; lets pipeline modules take a fake in tests."""
 
-    def generate(self, task_key: str, system: str, prompt: str) -> LLMResponse:
+    def generate(self, task_key: str, system: str, prompt: str, grounded: bool = False) -> LLMResponse:
         """Generate text for a pipeline task, routed to whatever provider/model backs task_key."""
         ...
 
@@ -50,8 +50,10 @@ class OllamaProvider:
         self._host = host.rstrip("/")
         self._timeout = timeout
 
-    def generate(self, system: str, prompt: str, model: str) -> LLMResponse:
+    def generate(self, system: str, prompt: str, model: str, grounded: bool = False) -> LLMResponse:
         """Call Ollama's /api/generate endpoint and translate its response into an LLMResponse."""
+        if grounded:
+            raise ValueError("Ollama has no web-search grounding capability - route grounded tasks to gemini")
         response = httpx.post(
             f"{self._host}/api/generate",
             json={"model": model, "system": system, "prompt": prompt, "stream": False},
@@ -80,22 +82,33 @@ class GeminiProvider:
         self._host = host.rstrip("/")
         self._timeout = timeout
 
-    def generate(self, system: str, prompt: str, model: str) -> LLMResponse:
+    def generate(self, system: str, prompt: str, model: str, grounded: bool = False) -> LLMResponse:
         """Call Gemini's generateContent endpoint.
 
         The API key goes in the x-goog-api-key header, never the URL - Gemini also accepts
         it as a `?key=` query param, but query params are far more likely to end up copied
         into logs, error messages, or shell history than headers are.
+
+        grounded=True adds Gemini's documented Google Search grounding tool
+        (`"tools": [{"google_search": {}}]`), which lets the model check its answer against
+        live web search before responding - used by fact_checker.py. This relies on the
+        model including what it found directly in its text response (which the fact-checker's
+        prompt asks for explicitly); it does not parse the separate structured
+        `groundingMetadata` field Gemini can also return, since that field's exact shape
+        hasn't been confirmed against a live response yet (verify and extend once it has).
         """
         if not self._api_key:
             raise ValueError("GEMINI_API_KEY is not set - required for the 'gemini' provider")
+        request_body: dict = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "systemInstruction": {"parts": [{"text": system}]},
+        }
+        if grounded:
+            request_body["tools"] = [{"google_search": {}}]
         response = httpx.post(
             f"{self._host}/v1beta/models/{model}:generateContent",
             headers={"x-goog-api-key": self._api_key, "Content-Type": "application/json"},
-            json={
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "systemInstruction": {"parts": [{"text": system}]},
-            },
+            json=request_body,
             timeout=self._timeout,
         )
         response.raise_for_status()
@@ -151,7 +164,7 @@ class LLMRouter:
         """Cumulative estimated cost of every generate() call made through this router instance."""
         return self._total_cost_usd
 
-    def generate(self, task_key: str, system: str, prompt: str) -> LLMResponse:
+    def generate(self, task_key: str, system: str, prompt: str, grounded: bool = False) -> LLMResponse:
         """Generate text for a pipeline task, routed to the provider/model set in config.yaml."""
         task_cfg = self._config.model_for(task_key)
         provider = self._providers.get(task_cfg.provider)
@@ -159,7 +172,7 @@ class LLMRouter:
             raise UnsupportedProviderError(
                 f"task '{task_key}' routes to provider '{task_cfg.provider}', which has no implemented adapter yet"
             )
-        result = provider.generate(system, prompt, task_cfg.model)
+        result = provider.generate(system, prompt, task_cfg.model, grounded=grounded)
         if self._config.cost_tracking.enabled:
             self._total_cost_usd += result.cost_usd
         return result
