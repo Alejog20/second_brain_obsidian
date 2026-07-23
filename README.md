@@ -184,57 +184,28 @@ variables in `docker-compose.yml` against your own setup.
 
 Command reference
 
-┌──────────────────┬────────────────────────────┬─────────────────────────────────────────────────────────────────────────────┐
-│     Command      │            Flag            │                                     Use                                     │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ (global, any     │ -v, --verbose              │ Debug-level logging                                                         │
-│ command)         │                            │                                                                             │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ (global, any     │ -q, --quiet                │ Only warnings/errors                                                        │
-│ command)         │                            │                                                                             │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ (global, any     │ --help                     │ Show help for that command                                                  │
-│ command)         │                            │                                                                             │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ run              │ (no flags)                 │ Run the pipeline once: manifest diff → reorganize → digest → AGENTS.md →    │
-│                  │                            │ report                                                                      │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ run              │ --config, -c PATH          │ Path to config.yaml (default $CONFIG_PATH or ./config.yaml)                 │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ run              │ --vault PATH               │ Override vault path (else $VAULT_PATH, else config)                         │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ run              │ --apply                    │ overriding config/DRY_RUN                      │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ run              │ --dry-run                  │ iding config/DRY_RUN                           │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ run              │ --git-review /             │ view.enabled                                   │
-│                  │ --no-git-review            │                                                                             │
-├──────────────────┼────────────────────────────┼────────────────────────────────────────────────┤
-│ run              │ --full                     │ Process every note in the vault, not just what changed since last run       │
-├──────────────────┼────────────────────────────┼────────────────────────────────────────────────┤
-│ run              │ --show-report /            │ Print the generated report to the terminal (default: show)                  │
-│                  │ --no-show-report           │                                                │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ status           │ --config, -c PATH          │                                                │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ status           │ --vault PATH               │                                                │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ status           │ (output)                   │ e, materiality threshold, embeddings, git      │
-│                  │                            │ review, and full model routing table                                        │
-├──────────────────┼────────────────────────────┼────────────────────────────────────────────────┤
-│ check            │ --config, -c PATH          │ Path to config.yaml                                                         │
-├──────────────────┼────────────────────────────┼────────────────────────────────────────────────┤
-│ check            │ --vault PATH               │ Override vault path                                                         │
-├──────────────────┼────────────────────────────┼────────────────────────────────────────────────┤
-│ check            │ (output)                   │ Preflight: vault exists + is a git repo, Ollama reachable (if used), Gemini │
-│                  │                            │                                                │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ report           │ --config, -c PATH          │                                                │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ report           │ --vault PATH               │                                                │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ report           │ --date STR                 │ te_date_format (default: today)                │
-├──────────────────┼────────────────────────────┼─────────────────────────────────────────────────────────────────────────────┤
-│ report           │ --type review|recap        │  = the morning reinforcement summary (default: │
-│                  │                            │  review)                                                                    │
-└──────────────────┴────────────────────────────┴────────────────────────────────────────────────┘
+| **Command**              | **Flag / Option**        | **Description**                                                                                                                                                                   |
+| ------------------------ | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Global (any command)** | `-v`, `--verbose`        | Enable debug-level logging.                                                                                                                                                       |
+| **Global (any command)** | `-q`, `--quiet`          | Show only warnings and errors.                                                                                                                                                    |
+| **Global (any command)** | `--help`                 | Display help for the selected command.                                                                                                                                            |
+| **run**                  | *(no flags)*             | Run the entire pipeline once: **manifest → diff → reorganize → digest → AGENTS.md → report**.                                                                                     |
+| **run**                  | `-c`, `--config PATH`    | Specify the path to `config.yaml`. Default: `$CONFIG_PATH` or `./config.yaml`.                                                                                                    |
+| **run**                  | `--vault PATH`           | Override the vault path. Falls back to `$VAULT_PATH`, then the config file.                                                                                                       |
+| **run**                  | `--apply`                | Force changes to be applied, overriding the `DRY_RUN` configuration.                                                                                                              |
+| **run**                  | `--dry-run`              | Simulate execution without making changes, overriding the `DRY_RUN` configuration.                                                                                                |
+| **run**                  | `--git-review`           | Enable Git review regardless of configuration.                                                                                                                                    |
+| **run**                  | `--no-git-review`        | Disable Git review regardless of configuration.                                                                                                                                   |
+| **run**                  | `--full`                 | Process every note in the vault instead of only notes changed since the previous run.                                                                                             |
+| **run**                  | `--show-report`          | Print the generated report to the terminal (default behavior).                                                                                                                    |
+| **run**                  | `--no-show-report`       | Do not print the generated report to the terminal.                                                                                                                                |
+| **status**               | `-c`, `--config PATH`    | Specify the path to `config.yaml`.                                                                                                                                                |
+| **status**               | `--vault PATH`           | Override the vault path.                                                                                                                                                          |
+| **status**               | *(output)*               | Display the current configuration, materiality threshold, embeddings status, Git review settings, and the complete model routing table.                                           |
+| **check**                | `-c`, `--config PATH`    | Specify the path to `config.yaml`.                                                                                                                                                |
+| **check**                | `--vault PATH`           | Override the vault path.                                                                                                                                                          |
+| **check**                | *(output)*               | Run preflight checks: verify the vault exists, is a Git repository, confirm Ollama is reachable (if configured), validate Gemini connectivity, and check configuration integrity. |
+| **report**               | `-c`, `--config PATH`    | Specify the path to `config.yaml`.                                                                                                                                                |
+| **report**               | `--vault PATH`           | Override the vault path.                                                                                                                                                          |
+| **report**               | `--date STR`             | Generate a report for a specific date. Uses the configured date format. Default: **today**.                                                                                       |
+| **report**               | `--type review \| recap` | Select the report type. `review` generates the morning reinforcement summary (default); `recap` generates a recap report.                                                         |
